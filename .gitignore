@@ -1,4 +1,7 @@
-﻿# Python
+# Generated output artifacts
+integrated_pm_assistant/output/
+
+# Python
 .venv/
 __pycache__/
 *.pyc
