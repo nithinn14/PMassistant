@@ -16,8 +16,9 @@ import asyncio
 import os
 import re
 from pathlib import Path
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
 
+import pandas as pd
 from google.adk.agents.base_agent import BaseAgent
 from google.adk.agents.invocation_context import InvocationContext
 from google.genai import types
@@ -30,6 +31,7 @@ from tools.resource_validator import (
     check_workflow_resolution,
 )
 from agents.communication.factory import build_notification_agent
+from agents.communication.notifiers.email_notifier import is_valid_email
 from data_backend import get_backend
 from config_loader import load_config
 from telegram_bot import run_telegram_listener
@@ -43,10 +45,28 @@ def _get_poll_interval() -> int:
     return load_config()["workflow"]["poll_interval_seconds"]
 
 
-def _get_pm_email() -> str:
-    df = get_backend().read("employees")
-    pm_rows = df[df["Role"].str.contains("Project Manager", case=False, na=False)]
-    return str(pm_rows.iloc[0]["Email"])
+def _get_pm_email() -> Optional[str]:
+    """
+    Safely retrieve the Project Manager's email address from employees data.
+    Returns a stripped email string if valid and present, otherwise None.
+    """
+    try:
+        df = get_backend().read("employees")
+        if df.empty or "Role" not in df.columns or "Email" not in df.columns:
+            return None
+        pm_rows = df[df["Role"].str.contains("Project Manager", case=False, na=False)]
+        if pm_rows.empty:
+            return None
+        val = pm_rows.iloc[0]["Email"]
+        if pd.isna(val) or val is None:
+            return None
+        email_str = str(val).strip()
+        if not email_str or email_str.lower() in {"nan", "none", "null"}:
+            return None
+        return email_str
+    except Exception as exc:
+        print(f"⚠️ Could not retrieve PM email: {exc}")
+        return None
 
 
 def _get_employees_path() -> Path:
@@ -118,6 +138,25 @@ class ResourceValidationAgent(BaseAgent):
         missing_roles = validation["missing_roles"]
         shortages = validation["shortages"]
 
+        pm_email = _get_pm_email()
+        notification_issues = []
+        if not is_valid_email(pm_email):
+            notification_issues.append({
+                "recipient": "Project Manager",
+                "role": "Project Manager",
+                "email": pm_email if pm_email is not None else None,
+                "reason": f"Missing or invalid email address ('{pm_email}')",
+                "channel": "email",
+                "action_impacted": "resource_shortage_alert",
+            })
+            print(
+                f"⚠️ [Notification] PM email is missing or invalid ('{pm_email}'). "
+                f"Skipping email alert and recording issue in diagnostic report."
+            )
+
+        if notification_issues:
+            validation["notification_issues"] = notification_issues
+
         diagnostic_path = save_diagnostic_report(project_name, validation)
         # Important: always reset resolution to PENDING when entering a new
         # shortage cycle, so stale state from a previous run is overwritten.
@@ -127,12 +166,13 @@ class ResourceValidationAgent(BaseAgent):
             missing_roles=missing_roles,
             diagnostic_path=diagnostic_path,
             resolution="PENDING",
+            notification_issues=notification_issues if notification_issues else None,
         )
 
         # Send Email + Telegram alert (with bot command hints)
         notifier = build_notification_agent(load_config())
         notifier.notify_resource_shortage(
-            pm_email=_get_pm_email(),
+            pm_email=pm_email,
             project_name=project_name,
             missing_roles=missing_roles,
             impacted_tasks=shortages,

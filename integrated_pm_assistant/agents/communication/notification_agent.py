@@ -22,8 +22,9 @@ PM-level system alerts:
 
 from typing import Any, Dict, List, Optional
 
-from agents.communication.notifiers.email_notifier import EmailNotifier
+from agents.communication.notifiers.email_notifier import EmailNotifier, is_valid_email
 from agents.communication.notifiers.telegram_notifier import TelegramNotifier
+from tools.resource_validator import record_notification_issues
 
 
 class NotificationAgent:
@@ -36,23 +37,24 @@ class NotificationAgent:
     def __init__(self, email_notifier: EmailNotifier, telegram_notifier: TelegramNotifier):
         self._email = email_notifier
         self._telegram = telegram_notifier
+        self.notification_issues: List[Dict[str, Any]] = []
 
     # ── Public notification methods ─────────────────────────────────────────
 
     def notify_task_assigned(
         self,
-        to_email: str,
+        to_email: Optional[str],
         employee_name: str,
         project_name: str,
         task_name: str,
         deadline: str,
         priority: str = "",
         telegram_chat_id: Optional[str] = None,
-    ) -> None:
+    ) -> bool:
         """
         Notify a single employee of a task assignment.
 
-        Step 1: Send full-detail email to the employee.
+        Step 1: Send full-detail email to the employee (if email is valid).
         Step 2: If the employee has a Telegram chat_id, send a direct DM.
 
         Args:
@@ -65,34 +67,109 @@ class NotificationAgent:
             telegram_chat_id:  If provided, sends a direct Telegram DM.
                                Pass None / empty to skip Telegram (e.g., employee not registered).
         """
-        # 1. Email first — always
-        self._email.send(
-            to_email=to_email,
-            subject=f"Task Assigned: {task_name} | {project_name}",
-            message=self._task_assignment_email_body(
-                employee_name, project_name, task_name, deadline, priority
-            ),
-        )
+        email_sent = False
+        if is_valid_email(to_email):
+            email_sent = self._email.send(
+                to_email=str(to_email).strip(),
+                subject=f"Task Assigned: {task_name} | {project_name}",
+                message=self._task_assignment_email_body(
+                    employee_name, project_name, task_name, deadline, priority
+                ),
+            )
+        else:
+            issue = {
+                "recipient": employee_name,
+                "task": task_name,
+                "email": to_email if to_email is not None else None,
+                "reason": f"Missing or invalid email address ('{to_email}')",
+                "channel": "email",
+                "action_impacted": "task_assignment",
+            }
+            self.notification_issues.append(issue)
+            print(
+                f"⚠️ [NotificationAgent] Skipping task assignment email for employee '{employee_name}' "
+                f"(task: '{task_name}'): invalid or missing email address '{to_email}'."
+            )
+            record_notification_issues(project_name, self.notification_issues)
 
         # 2. Telegram DM — only if employee has registered
-        if telegram_chat_id:
-            self._telegram.send_task_assignment(
-                chat_id=telegram_chat_id,
-                employee_name=employee_name,
+        if telegram_chat_id and str(telegram_chat_id).strip().lower() not in {"nan", "none", "null", ""}:
+            try:
+                self._telegram.send_task_assignment(
+                    chat_id=str(telegram_chat_id).strip(),
+                    employee_name=employee_name,
+                    project_name=project_name,
+                    task_name=task_name,
+                    deadline=deadline,
+                    priority=priority,
+                )
+            except Exception as exc:
+                print(f"⚠️ Telegram DM to {employee_name} failed: {exc}")
+
+        return email_sent
+
+    def notify_task_assignments_batch(
+        self,
+        project_name: str,
+        assignments: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """
+        Notify multiple employees of their task assignments.
+        Skips invalid recipient emails gracefully with logging and records notification issues.
+
+        Args:
+            project_name: Name of the project.
+            assignments: List of dicts, each containing:
+                - to_email: str
+                - employee_name: str
+                - task_name: str
+                - deadline: str
+                - priority: Optional[str]
+                - telegram_chat_id: Optional[str]
+
+        Returns:
+            Dict summary: {"total": int, "sent": int, "skipped": int, "issues": list}
+        """
+        sent_count = 0
+        skipped_count = 0
+
+        for item in assignments:
+            to_email = item.get("to_email")
+            emp_name = item.get("employee_name", "Team Member")
+            task_name = item.get("task_name", "Task")
+            deadline = item.get("deadline", "N/A")
+            priority = item.get("priority", "")
+            chat_id = item.get("telegram_chat_id")
+
+            sent = self.notify_task_assigned(
+                to_email=to_email,
+                employee_name=emp_name,
                 project_name=project_name,
                 task_name=task_name,
                 deadline=deadline,
                 priority=priority,
+                telegram_chat_id=chat_id,
             )
+            if sent:
+                sent_count += 1
+            else:
+                skipped_count += 1
+
+        return {
+            "total": len(assignments),
+            "sent": sent_count,
+            "skipped": skipped_count,
+            "issues": list(self.notification_issues),
+        }
 
     def notify_project_assignment(
         self,
-        to_email: str,
+        to_email: Optional[str],
         employee_name: str,
         project_name: str,
         tasks: List[Dict[str, Any]],
         telegram_chat_id: Optional[str] = None,
-    ) -> None:
+    ) -> bool:
         """
         Email full assignment details + optional Telegram DM summary.
 
@@ -100,66 +177,112 @@ class NotificationAgent:
             telegram_chat_id: If provided, sends Telegram DM to this employee directly.
                               Pass None to skip Telegram (employee not yet registered).
         """
-        self._email.send(
-            to_email=to_email,
-            subject=f"Project Assignment: {project_name}",
-            message=self._assignment_email_body(employee_name, project_name, tasks),
-        )
+        email_sent = False
+        if is_valid_email(to_email):
+            email_sent = self._email.send(
+                to_email=str(to_email).strip(),
+                subject=f"Project Assignment: {project_name}",
+                message=self._assignment_email_body(employee_name, project_name, tasks),
+            )
+        else:
+            issue = {
+                "recipient": employee_name,
+                "email": to_email if to_email is not None else None,
+                "reason": f"Missing or invalid email address ('{to_email}')",
+                "channel": "email",
+                "action_impacted": "project_assignment",
+            }
+            self.notification_issues.append(issue)
+            print(
+                f"⚠️ [NotificationAgent] Skipping project assignment email for employee '{employee_name}': "
+                f"invalid or missing email address '{to_email}'."
+            )
+            record_notification_issues(project_name, self.notification_issues)
 
-        if telegram_chat_id:
+        if telegram_chat_id and str(telegram_chat_id).strip().lower() not in {"nan", "none", "null", ""}:
             task_summary = ", ".join(t.get("task_name", "Task") for t in tasks[:3])
             if len(tasks) > 3:
                 task_summary += f" (+{len(tasks) - 3} more)"
-            self._telegram.send_to_chat(
-                chat_id=telegram_chat_id,
-                message=(
-                    f"🚨 *Project Assignment*\n\n"
-                    f"Hello {employee_name},\n\n"
-                    f"You have been assigned to *{TelegramNotifier.escape_md(project_name)}*\n\n"
-                    f"Tasks: {TelegramNotifier.escape_md(task_summary)}\n\n"
-                    f"📧 Check your email for the full assignment details."
-                ),
-            )
+            try:
+                self._telegram.send_to_chat(
+                    chat_id=str(telegram_chat_id).strip(),
+                    message=(
+                        f"🚨 *Project Assignment*\n\n"
+                        f"Hello {employee_name},\n\n"
+                        f"You have been assigned to *{TelegramNotifier.escape_md(project_name)}*\n\n"
+                        f"Tasks: {TelegramNotifier.escape_md(task_summary)}\n\n"
+                        f"📧 Check your email for the full assignment details."
+                    ),
+                )
+            except Exception as exc:
+                print(f"⚠️ Telegram message to {employee_name} failed: {exc}")
         else:
             # Fallback: PM-channel alert (original behavior)
-            self._telegram.send(
-                f"🚨 *Project Assignment*\n"
-                f"Employee *{employee_name}* assigned to: *{project_name}*\n"
-                f"Check email for full details."
-            )
+            try:
+                self._telegram.send(
+                    f"🚨 *Project Assignment*\n"
+                    f"Employee *{employee_name}* assigned to: *{project_name}*\n"
+                    f"Check email for full details."
+                )
+            except Exception as exc:
+                print(f"⚠️ Telegram PM alert failed: {exc}")
+
+        return email_sent
 
     def notify_resource_shortage(
         self,
-        pm_email: str,
+        pm_email: Optional[str],
         project_name: str,
         missing_roles: Dict[str, int],
         impacted_tasks: List[Dict[str, Any]],
         diagnostic_file_path: str,
         workflow_state_path: str,
-    ) -> None:
+    ) -> bool:
         """
         Send the full formatted shortage report email + Telegram alert to PM.
         Email body matches the original bordered format.
         """
-        self._email.send(
-            to_email=pm_email,
-            subject=f"🚨 Resource Shortage Detected – Action Required | {project_name}",
-            message=self._shortage_email_body(
-                project_name, missing_roles, impacted_tasks,
-                diagnostic_file_path, workflow_state_path,
-            ),
-        )
+        email_sent = False
+        if is_valid_email(pm_email):
+            email_sent = self._email.send(
+                to_email=str(pm_email).strip(),
+                subject=f"🚨 Resource Shortage Detected – Action Required | {project_name}",
+                message=self._shortage_email_body(
+                    project_name, missing_roles, impacted_tasks,
+                    diagnostic_file_path, workflow_state_path,
+                ),
+            )
+        else:
+            issue = {
+                "recipient": "Project Manager",
+                "role": "Project Manager",
+                "email": pm_email if pm_email is not None else None,
+                "reason": f"Missing or invalid email address ('{pm_email}')",
+                "channel": "email",
+                "action_impacted": "resource_shortage_alert",
+            }
+            self.notification_issues.append(issue)
+            print(
+                f"⚠️ [NotificationAgent] Skipping shortage alert email to PM: "
+                f"invalid or missing email address '{pm_email}'."
+            )
+            record_notification_issues(project_name, self.notification_issues)
 
         roles_lines = "\n".join(
             f"  • {TelegramNotifier.escape_md(role)} — {count}"
             for role, count in missing_roles.items()
         )
-        self._telegram.send(
-            f"🚨 *RESOURCE SHORTAGE ALERT*\n\n"
-            f"*Project:* {TelegramNotifier.escape_md(project_name)}\n\n"
-            f"*Missing Roles:*\n{roles_lines}\n\n"
-            f"📧 Please check your email for the full diagnostic report\\."
-        )
+        try:
+            self._telegram.send(
+                f"🚨 *RESOURCE SHORTAGE ALERT*\n\n"
+                f"*Project:* {TelegramNotifier.escape_md(project_name)}\n\n"
+                f"*Missing Roles:*\n{roles_lines}\n\n"
+                f"📧 Please check your email for the full diagnostic report\\."
+            )
+        except Exception as exc:
+            print(f"⚠️ Telegram alert to PM failed: {exc}")
+
+        return email_sent
 
     def notify_meeting_created(
         self,
@@ -241,7 +364,19 @@ class NotificationAgent:
         for emp in employees:
             email = emp.get("Email", "")
             name = emp.get("Employee_Name", "Team Member")
-            if not email:
+            if not is_valid_email(email):
+                issue = {
+                    "recipient": name,
+                    "email": email if email is not None else None,
+                    "reason": f"Missing or invalid email address ('{email}')",
+                    "channel": "email",
+                    "action_impacted": "registration_invite",
+                }
+                self.notification_issues.append(issue)
+                print(
+                    f"⚠️ [NotificationAgent] Skipping registration invite for '{name}': "
+                    f"invalid or missing email address '{email}'."
+                )
                 continue
             try:
                 self._email.send_telegram_registration_invite(

@@ -9,7 +9,7 @@ import json
 import yaml
 from pathlib import Path
 from datetime import datetime
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 
 def validate_resources(project_name: str, tasks: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -59,10 +59,12 @@ def save_diagnostic_report(project_name: str, validation_result: Dict[str, Any])
     report = {
         "project": project_name,
         "timestamp": datetime.now().isoformat(),
-        "total_shortages": validation_result["total_shortages"],
-        "missing_roles": validation_result["missing_roles"],
-        "shortage_details": validation_result["shortages"],
+        "total_shortages": validation_result.get("total_shortages", 0),
+        "missing_roles": validation_result.get("missing_roles", {}),
+        "shortage_details": validation_result.get("shortages", []),
     }
+    if "notification_issues" in validation_result:
+        report["notification_issues"] = validation_result["notification_issues"]
 
     file_path = output_dir / f"{project_name}_resource_diagnostic.json"
     with open(file_path, "w", encoding="utf-8") as f:
@@ -72,12 +74,49 @@ def save_diagnostic_report(project_name: str, validation_result: Dict[str, Any])
     return str(file_path)
 
 
+def record_notification_issues(project_name: str, issues: List[Dict[str, Any]]) -> str:
+    """
+    Writes notification issues to output/<project_name>_notification_issues.json
+    and synchronizes with output/<project_name>_resource_diagnostic.json if present.
+    Returns the file path.
+    """
+    output_dir = Path("output")
+    output_dir.mkdir(exist_ok=True)
+
+    data = {
+        "project": project_name,
+        "timestamp": datetime.now().isoformat(),
+        "total_issues": len(issues),
+        "notification_issues": issues,
+    }
+
+    file_path = output_dir / f"{project_name}_notification_issues.json"
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, default=str)
+
+    print(f"📋 Notification issues report saved: {file_path}")
+
+    diag_path = output_dir / f"{project_name}_resource_diagnostic.json"
+    if diag_path.exists():
+        try:
+            with open(diag_path, "r", encoding="utf-8") as f:
+                diag = json.load(f)
+            diag["notification_issues"] = issues
+            with open(diag_path, "w", encoding="utf-8") as f:
+                json.dump(diag, f, indent=2, default=str)
+        except Exception as exc:
+            print(f"⚠️ Could not update diagnostic file with notification issues: {exc}")
+
+    return str(file_path)
+
+
 def update_workflow_state(
     project_name: str,
     status: str,
     missing_roles: Dict[str, int],
     diagnostic_path: str = "",
     resolution: str = "PENDING",
+    notification_issues: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """
     Writes/updates workflow_state.yaml in the output directory.
@@ -94,6 +133,8 @@ def update_workflow_state(
         "missing_roles": missing_roles,
         "timestamp": datetime.now().isoformat(),
     }
+    if notification_issues is not None:
+        state["notification_issues"] = notification_issues
 
     file_path = output_dir / f"{project_name}_workflow_state.yaml"
     with open(file_path, "w", encoding="utf-8") as f:

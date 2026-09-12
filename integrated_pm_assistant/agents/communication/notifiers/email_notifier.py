@@ -2,6 +2,28 @@ import smtplib
 from email.message import EmailMessage
 
 
+def is_valid_email(email: object) -> bool:
+    """
+    Validate that an email address is plausible before attempting to send.
+    Must not be empty, None, literal 'nan'/'none'/'null', and must contain
+    an '@' and at least one '.' after it.
+    """
+    if email is None:
+        return False
+    email_str = str(email).strip()
+    if not email_str or email_str.lower() in {"nan", "none", "null"}:
+        return False
+    if "@" not in email_str:
+        return False
+    local, _, domain = email_str.partition("@")
+    if not local or not domain or "." not in domain:
+        return False
+    domain_parts = domain.split(".")
+    if any(not part for part in domain_parts):
+        return False
+    return True
+
+
 class EmailNotifier:
     """
     Single responsibility: send emails via SMTP.
@@ -20,19 +42,27 @@ class EmailNotifier:
         self._host = smtp_host
         self._port = smtp_port
 
-    def send(self, to_email: str, subject: str, message: str) -> None:
-        """Send a plain-text email."""
+    def send(self, to_email: str, subject: str, message: str) -> bool:
+        """Send a plain-text email if to_email is valid."""
+        if not is_valid_email(to_email):
+            print(f"⚠️ [EmailNotifier] Invalid recipient email address: '{to_email}'. Skipping SMTP send.")
+            return False
+
         msg = EmailMessage()
         msg["From"] = self._sender
         msg["To"] = to_email
         msg["Subject"] = subject
         msg.set_content(message)
 
-        with smtplib.SMTP_SSL(self._host, self._port) as server:
-            server.login(self._sender, self._password)
-            server.send_message(msg)
-
-        print(f"📧 Email sent → {to_email}")
+        try:
+            with smtplib.SMTP_SSL(self._host, self._port) as server:
+                server.login(self._sender, self._password)
+                server.send_message(msg)
+            print(f"📧 Email sent → {to_email}")
+            return True
+        except Exception as exc:
+            print(f"❌ [EmailNotifier] SMTP send failed for {to_email}: {exc}")
+            return False
 
     def send_telegram_registration_invite(
         self,

@@ -66,6 +66,12 @@ class ExcelBackend(DataBackend):
 
         df = pd.read_excel(path)
 
+        # Sanitize blank / NaN email cells to None at data-loading time
+        if table_name.lower() == "employees" and "Email" in df.columns:
+            df["Email"] = df["Email"].apply(
+                lambda v: None if pd.isna(v) or str(v).strip().lower() in {"nan", "none", "null", ""} else str(v).strip()
+            )
+
         if filters:
             for col, val in filters.items():
                 if col in df.columns:
