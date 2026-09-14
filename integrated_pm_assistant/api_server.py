@@ -11,7 +11,8 @@ Endpoints:
     GET  /api/download/<filename>    → serve output files
 """
 
-import json, os, sys, re, io, uuid, threading, time, math
+import json, os, sys, re, io, uuid, threading, time, math, asyncio, yaml
+from typing import Optional, Dict, Any, List
 from pathlib import Path
 from datetime import datetime
 
@@ -91,6 +92,10 @@ class OutputCapture(io.StringIO):
         self._real_stdout.flush()
 
     def _update_step(self, text: str):
+        # Detect PRD save to capture the AI-generated/actual project name early
+        if "prd json saved at:" in text.lower():
+            self._detect_actual_project_name(text)
+
         for keyword, step_label in STEP_KEYWORDS:
             if keyword.lower() in text.lower():
                 job = jobs.get(self.job_id)
@@ -98,6 +103,214 @@ class OutputCapture(io.StringIO):
                     job["completed_steps"].append(step_label)
                     job["current_step"] = step_label
                 break
+
+    def _detect_actual_project_name(self, text: str):
+        try:
+            match = re.search(r"PRD JSON saved at:\s*(.*?_PRD\.json)", text, re.IGNORECASE)
+            if match:
+                json_path = Path(match.group(1).strip())
+                actual_name = None
+                if json_path.exists():
+                    try:
+                        with open(json_path, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                            actual_name = data.get("product_name") or data.get("project_name")
+                    except Exception:
+                        pass
+                if not actual_name:
+                    actual_name = json_path.stem.replace("_PRD", "").strip()
+
+                job = jobs.get(self.job_id)
+                if job and actual_name:
+                    job["actual_project_name"] = actual_name
+                    job["project_name"] = actual_name
+        except Exception:
+            pass
+
+
+def find_actual_project_name(
+    original_project_name: str,
+    output_dir: Path = OUTPUT_DIR,
+    job_start_time: Optional[float] = None,
+    logs: Optional[List[str]] = None,
+    job: Optional[dict] = None,
+) -> str:
+    """
+    Determines the actual project name used by the pipeline.
+    The PM Agent / save_prd_tool may generate an AI-refined product_name
+    different from the original typed-in project_name.
+
+    Priority:
+    1. job['actual_project_name'] if set and different from original, provided its PRD exists
+    2. Inspect captured execution logs for 'PRD JSON saved at: <path>'
+    3. Check if {original_project_name}_PRD.json exists and was modified during this run
+    4. If job_start_time is known, scan output_dir for any *_PRD.json modified during this run
+    5. Fallback: original_project_name
+    """
+    if job_start_time is None and job and job.get("started_at"):
+        try:
+            job_start_time = datetime.fromisoformat(job["started_at"]).timestamp()
+        except Exception:
+            pass
+
+    # 1. Job dictionary check
+    if job and job.get("actual_project_name"):
+        candidate = job["actual_project_name"]
+        if candidate != original_project_name and (output_dir / f"{candidate}_PRD.json").exists():
+            return candidate
+
+    # 2. Inspect logs for "PRD JSON saved at:"
+    if logs:
+        for line in reversed(logs):
+            if "prd json saved at:" in line.lower():
+                match = re.search(r"PRD JSON saved at:\s*(.*?_PRD\.json)", line, re.IGNORECASE)
+                if match:
+                    json_path = Path(match.group(1).strip())
+                    if json_path.exists():
+                        try:
+                            with open(json_path, "r", encoding="utf-8") as f:
+                                data = json.load(f)
+                                name = data.get("product_name") or data.get("project_name")
+                                if name:
+                                    return name
+                        except Exception:
+                            pass
+                    name = json_path.stem.replace("_PRD", "").strip()
+                    if name:
+                        return name
+
+    # 3. Check if original name's PRD exists and was modified since job started
+    orig_prd = output_dir / f"{original_project_name}_PRD.json"
+    if orig_prd.exists():
+        if job_start_time is None or orig_prd.stat().st_mtime >= (job_start_time - 5):
+            return original_project_name
+
+    # 4. If job_start_time is known, scan output directory for any *_PRD.json modified during this run
+    if job_start_time and output_dir.exists():
+        candidates = []
+        for p in output_dir.glob("*_PRD.json"):
+            mtime = p.stat().st_mtime
+            if mtime >= (job_start_time - 5):
+                candidates.append((mtime, p))
+        if candidates:
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            latest_path = candidates[0][1]
+            try:
+                with open(latest_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    name = data.get("product_name") or data.get("project_name")
+                    if name:
+                        return name
+            except Exception:
+                pass
+            return latest_path.stem.replace("_PRD", "").strip()
+
+    # 5. Fallback to original
+    return original_project_name
+
+
+def verify_pipeline_output(
+    project_name: str,
+    output_dir: Path = OUTPUT_DIR,
+    job: Optional[dict] = None,
+) -> dict:
+    """
+    Layer 2 Safety Net:
+    Verifies that the required output artifacts for a project actually exist.
+    Distinguishes between:
+      1. Genuine success (all core artifacts present)
+      2. Valid paused state (RESOURCE_BLOCKED in workflow_state.yaml)
+      3. Failure (missing artifacts indicating early, unannounced crash or termination)
+
+    Returns:
+        dict: {
+            "success": bool,
+            "status": "completed" | "resource_blocked" | "failed",
+            "error": Optional[str],
+            "current_step": str,
+        }
+    """
+    actual_name = project_name
+    prd_path = output_dir / f"{actual_name}_PRD.json"
+
+    # If PRD under project_name does not exist, check if project was renamed
+    if not prd_path.exists():
+        resolved = find_actual_project_name(
+            original_project_name=project_name,
+            output_dir=output_dir,
+            logs=job.get("logs") if job else None,
+            job=job,
+        )
+        if resolved and resolved != project_name and (output_dir / f"{resolved}_PRD.json").exists():
+            actual_name = resolved
+            if job:
+                job["actual_project_name"] = actual_name
+                job["project_name"] = actual_name
+            prd_path = output_dir / f"{actual_name}_PRD.json"
+
+    tasks_path = output_dir / f"{actual_name}_Tasks.xlsx"
+    assigned_path = output_dir / f"{actual_name}_Assigned.xlsx"
+    sched_path = output_dir / f"{actual_name}_Scheduled.xlsx"
+    wf_path = output_dir / f"{actual_name}_workflow_state.yaml"
+
+    # 1. Check PRD stage
+    if not prd_path.exists():
+        return {
+            "success": False,
+            "status": "failed",
+            "error": "Pipeline stopped during PRD generation — no PRD file was created.",
+            "current_step": "Error: Missing PRD Output",
+        }
+
+    # 2. Check Tasks stage
+    if not tasks_path.exists():
+        return {
+            "success": False,
+            "status": "failed",
+            "error": "Pipeline stopped after PRD generation — no tasks decomposition file was created.",
+            "current_step": "Error: Missing Tasks Output",
+        }
+
+    # 3. Check Resource Assignment stage
+    if not assigned_path.exists():
+        return {
+            "success": False,
+            "status": "failed",
+            "error": "Pipeline stopped after Task Decomposition — no resource assignment file was created.",
+            "current_step": "Error: Missing Resource Assignment Output",
+        }
+
+    # 4. Check for intentional paused workflow state (e.g. RESOURCE_BLOCKED)
+    if wf_path.exists():
+        try:
+            with open(wf_path, "r", encoding="utf-8") as f:
+                wf_data = yaml.safe_load(f) or {}
+            if wf_data.get("status") == "RESOURCE_BLOCKED":
+                return {
+                    "success": True,
+                    "status": "resource_blocked",
+                    "error": None,
+                    "current_step": "Resource Shortage Detected (Waiting for PM Resolution)",
+                }
+        except Exception as e:
+            print(f"⚠️ Error reading workflow_state.yaml: {e}")
+
+    # 5. Check Schedule stage
+    if not sched_path.exists():
+        return {
+            "success": False,
+            "status": "failed",
+            "error": "Pipeline stopped after Resource Assignment — no schedule file was created.",
+            "current_step": "Error: Missing Schedule Output",
+        }
+
+    # All required core stages produced their artifacts!
+    return {
+        "success": True,
+        "status": "completed",
+        "error": None,
+        "current_step": "Done",
+    }
 
 
 def _run_pipeline(job_id: str, project_name: str, project_description: str):
@@ -171,6 +384,7 @@ def _run_pipeline(job_id: str, project_name: str, project_description: str):
 
 
         for attempt in range(1, MAX_RETRIES + 1):
+            attempt_start_time = time.time()
             print(f"DEBUG: Attempt {attempt}/{MAX_RETRIES} — model: {model_name}")
 
             # Rebuild everything fresh on each attempt
@@ -194,33 +408,73 @@ def _run_pipeline(job_id: str, project_name: str, project_description: str):
             job["error"] = None
 
             try:
-                events = runner.run(user_id="user1", session_id=sid, new_message=content)
+                # Layer 1: Run via run_async in an asyncio event loop so agent exceptions propagate directly
+                async def _consume_events():
+                    out = ""
+                    idx = 0
+                    async for event in runner.run_async(
+                        user_id="user1", session_id=sid, new_message=content
+                    ):
+                        if hasattr(event, "step_name"):
+                            print(f"DEBUG: [Event {idx}] Step: {event.step_name}")
+                        idx += 1
 
-                final_output = ""
-                for i, event in enumerate(events):
-                    if hasattr(event, "step_name"):
-                        print(f"DEBUG: [Event {i}] Step: {event.step_name}")
-                    
-                    if not hasattr(event, "content") or event.content is None:
-                        continue
-                    
-                    parts = getattr(event.content, "parts", None)
-                    if not parts:
-                        continue
-                    for part in parts:
-                        text = getattr(part, "text", None)
-                        if text:
-                            final_output += text
+                        if not hasattr(event, "content") or event.content is None:
+                            continue
 
-                # Success! Mark as completed
-                job["status"] = "completed"
-                job["current_step"] = "Done"
-                if "Done" not in job["completed_steps"]:
-                    job["completed_steps"].append("Done")
-                job["final_output"] = final_output
-                job["logs"] = capture.lines
-                print(f"✅ Pipeline completed on attempt {attempt}")
-                return  # Exit the function on success
+                        parts = getattr(event.content, "parts", None)
+                        if not parts:
+                            continue
+                        for part in parts:
+                            text = getattr(part, "text", None)
+                            if text:
+                                out += text
+                    return out
+
+                final_output = asyncio.run(_consume_events())
+
+                # Resolve actual project name (in case PM Agent renamed the project)
+                actual_project_name = find_actual_project_name(
+                    original_project_name=project_name,
+                    output_dir=OUTPUT_DIR,
+                    job_start_time=attempt_start_time,
+                    logs=capture.lines,
+                    job=job,
+                )
+                job["actual_project_name"] = actual_project_name
+                job["project_name"] = actual_project_name
+
+                # Layer 2: Output verification safety net before declaring completion
+                verification = verify_pipeline_output(actual_project_name, OUTPUT_DIR, job)
+
+                if verification["status"] == "completed":
+                    job["status"] = "completed"
+                    job["current_step"] = "Done"
+                    if "Done" not in job["completed_steps"]:
+                        job["completed_steps"].append("Done")
+                    job["final_output"] = final_output
+                    job["logs"] = capture.lines
+                    print(f"✅ Pipeline completed on attempt {attempt} for '{actual_project_name}'")
+                    return
+
+                elif verification["status"] == "resource_blocked":
+                    job["status"] = "resource_blocked"
+                    job["current_step"] = verification["current_step"]
+                    if verification["current_step"] not in job["completed_steps"]:
+                        job["completed_steps"].append(verification["current_step"])
+                    job["final_output"] = final_output
+                    job["logs"] = capture.lines
+                    print(f"⏸️ Pipeline paused at Resource Validation for '{actual_project_name}' (status: RESOURCE_BLOCKED)")
+                    return
+
+                else:  # verification["status"] == "failed"
+                    err_msg = verification["error"]
+                    print(f"❌ Output verification failed: {err_msg}")
+                    job["status"] = "failed"
+                    job["error"] = err_msg
+                    job["current_step"] = verification["current_step"]
+                    job["logs"] = capture.lines
+                    return
 
             except Exception as e:
                 err_msg = str(e)
@@ -311,6 +565,8 @@ def start_project():
     jobs[job_id] = {
         "id": job_id,
         "project_name": project_name,
+        "original_project_name": project_name,
+        "actual_project_name": project_name,
         "status": "running",
         "current_step": "Initializing...",
         "completed_steps": [],
@@ -339,7 +595,9 @@ def job_status(job_id):
             "current_step": job["current_step"],
             "completed_steps": job["completed_steps"],
             "error": job["error"],
-            "project_name": job["project_name"],
+            "project_name": job.get("actual_project_name") or job["project_name"],
+            "original_project_name": job.get("original_project_name", job["project_name"]),
+            "actual_project_name": job.get("actual_project_name") or job["project_name"],
         }
     )
 
@@ -347,6 +605,12 @@ def job_status(job_id):
 @app.route("/api/project-results/<project_name>")
 def project_results(project_name):
     import pandas as pd
+
+    # If project_name matches original_project_name of a renamed job, resolve to actual_project_name
+    for j in jobs.values():
+        if j.get("original_project_name") == project_name and j.get("actual_project_name"):
+            project_name = j["actual_project_name"]
+            break
 
     result = {"project_name": project_name}
 
