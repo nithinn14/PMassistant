@@ -12,3 +12,6 @@ __pycache__/
 # Frontend
 node_modules/
 frontend/dist/
+
+# Excel lock files
+integrated_pm_assistant/~$*.xlsx
