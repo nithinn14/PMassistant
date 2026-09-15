@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import {
     Download,
     FileJson,
@@ -82,10 +83,14 @@ function Section({ icon: Icon, title, badge, children, delay = 0 }) {
 
 /* ─── Main ─────────────────────────────────── */
 export default function DashboardPage({ projectCtx }) {
+    const [searchParams, setSearchParams] = useSearchParams()
+    const projectParam = searchParams.get('project')
+    const activeProject = projectParam || projectCtx?.projectName || ''
+
     const [data, setData] = useState(null)
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState(null)
-    const [projectInput, setProjectInput] = useState(projectCtx?.projectName || '')
+    const [projectInput, setProjectInput] = useState(activeProject)
     const [syncing, setSyncing] = useState(false)
 
     async function handleSync() {
@@ -118,9 +123,24 @@ export default function DashboardPage({ projectCtx }) {
     }
 
     useEffect(() => {
-        if (projectCtx?.projectName) loadResults(projectCtx.projectName)
-        else setLoading(false)
-    }, [projectCtx?.projectName])
+        if (activeProject) {
+            setProjectInput(activeProject)
+            loadResults(activeProject)
+        } else {
+            setData(null)
+            setLoading(false)
+        }
+    }, [activeProject])
+
+    function handleManualLoad(name) {
+        if (!name?.trim()) return
+        const trimmed = name.trim()
+        if (projectParam !== trimmed) {
+            setSearchParams({ project: trimmed })
+        } else {
+            loadResults(trimmed)
+        }
+    }
 
     /* ── Empty state ──────── */
     if (!loading && !data) {
@@ -144,11 +164,11 @@ export default function DashboardPage({ projectCtx }) {
                             placeholder="e.g. Company Knowledge Hub"
                             value={projectInput}
                             onChange={(e) => setProjectInput(e.target.value)}
-                            onKeyDown={(e) => e.key === 'Enter' && loadResults(projectInput)}
+                            onKeyDown={(e) => e.key === 'Enter' && handleManualLoad(projectInput)}
                             className="flex-1 rounded-2xl border border-surface-200/80 dark:border-surface-700/50 bg-surface-50/50 dark:bg-surface-800/40 px-5 py-3.5 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-primary-500/30 transition-all"
                         />
                         <button
-                            onClick={() => loadResults(projectInput)}
+                            onClick={() => handleManualLoad(projectInput)}
                             className="px-6 py-3.5 rounded-2xl bg-gradient-to-r from-primary-600 to-accent-violet text-white font-bold text-sm shadow-xl shadow-primary-500/20 hover:shadow-primary-500/35 transition-all animate-gradient"
                         >
                             Load

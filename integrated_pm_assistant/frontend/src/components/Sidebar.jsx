@@ -43,8 +43,12 @@ const sections = [
     },
 ]
 
+const PROJECT_ROUTES = ['/dashboard', '/tasks', '/resources', '/meetings', '/gantt', '/notifications']
+
 export default function Sidebar({ dark, setDark }) {
     const location = useLocation()
+    const searchParams = new URLSearchParams(location.search)
+    const currentProject = searchParams.get('project')
 
     return (
         <aside className="hidden md:flex flex-col w-64 border-r border-surface-800/40 bg-surface-950/98 backdrop-blur-3xl transition-all duration-500 shrink-0">
@@ -73,10 +77,13 @@ export default function Sidebar({ dark, setDark }) {
                         <div className="space-y-1">
                             {section.links.map(({ to, icon: Icon, label, badge, dot, count }) => {
                                 const active = location.pathname === to
+                                const targetTo = (currentProject && PROJECT_ROUTES.includes(to))
+                                    ? `${to}?project=${encodeURIComponent(currentProject)}`
+                                    : to
                                 return (
                                     <NavLink
                                         key={to}
-                                        to={to}
+                                        to={targetTo}
                                         className={({ isActive }) => `
                                             group relative flex items-center gap-3 px-4 py-2.5 rounded-xl text-sm font-semibold transition-all duration-200
                                             ${isActive

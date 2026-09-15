@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { CalendarDays, CheckCircle2, XCircle, Clock, HelpCircle, RefreshCw } from 'lucide-react'
 import { getProjectResults, syncMeetings } from '../services/api'
 
@@ -17,10 +18,14 @@ function Badge({ children, color = 'gray' }) {
 }
 
 export default function MeetingsPage({ projectCtx }) {
+    const [searchParams, setSearchParams] = useSearchParams()
+    const projectParam = searchParams.get('project')
+    const activeProject = projectParam || projectCtx?.projectName || ''
+
     const [data, setData] = useState(null)
     const [loading, setLoading] = useState(true)
     const [syncing, setSyncing] = useState(false)
-    const [projectInput, setProjectInput] = useState(projectCtx?.projectName || '')
+    const [projectInput, setProjectInput] = useState(activeProject)
 
     async function loadData(name) {
         if (!name) return
@@ -44,9 +49,24 @@ export default function MeetingsPage({ projectCtx }) {
     }
 
     useEffect(() => {
-        if (projectCtx?.projectName) loadData(projectCtx.projectName)
-        else setLoading(false)
-    }, [projectCtx?.projectName])
+        if (activeProject) {
+            setProjectInput(activeProject)
+            loadData(activeProject)
+        } else {
+            setData(null)
+            setLoading(false)
+        }
+    }, [activeProject])
+
+    function handleManualLoad(name) {
+        if (!name?.trim()) return
+        const trimmed = name.trim()
+        if (projectParam !== trimmed) {
+            setSearchParams({ project: trimmed })
+        } else {
+            loadData(trimmed)
+        }
+    }
 
     if (!loading && !data) {
         return (
@@ -61,10 +81,10 @@ export default function MeetingsPage({ projectCtx }) {
                 <div className="project-input-group">
                     <input type="text" placeholder="Project name..."
                         value={projectInput} onChange={(e) => setProjectInput(e.target.value)}
-                        onKeyDown={(e) => e.key === 'Enter' && loadData(projectInput)}
+                        onKeyDown={(e) => e.key === 'Enter' && handleManualLoad(projectInput)}
                         className="border border-surface-200/80 dark:border-surface-700/50 bg-surface-50/50 dark:bg-surface-800/40 focus:outline-none focus:ring-2 focus:ring-primary-500/30"
                     />
-                    <button onClick={() => loadData(projectInput)}
+                    <button onClick={() => handleManualLoad(projectInput)}
                         className="bg-gradient-to-r from-primary-600 to-accent-violet text-white shadow-xl shadow-primary-500/20 hover:shadow-primary-500/35">
                         Load
                     </button>

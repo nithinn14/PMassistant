@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { BrowserRouter, Routes, Route, Navigate, useSearchParams } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import Sidebar from './components/Sidebar'
 import SetupPage from './pages/SetupPage'
 import ProcessingPage from './pages/ProcessingPage'
@@ -33,7 +33,7 @@ export default function App() {
                                 path="/processing"
                                 element={
                                     projectCtx.jobId ? (
-                                        <ProcessingPage projectCtx={projectCtx} />
+                                        <ProcessingPage projectCtx={projectCtx} setProjectCtx={setProjectCtx} />
                                     ) : (
                                         <Navigate to="/" replace />
                                     )

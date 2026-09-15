@@ -28,7 +28,7 @@ const STEPS = [
     { label: 'Done', icon: CheckCircle2, color: 'from-accent-emerald to-accent-cyan' },
 ]
 
-export default function ProcessingPage({ projectCtx }) {
+export default function ProcessingPage({ projectCtx, setProjectCtx }) {
     const navigate = useNavigate()
     const [completedSteps, setCompletedSteps] = useState([])
     const [currentStep, setCurrentStep] = useState('Initializing...')
@@ -48,7 +48,11 @@ export default function ProcessingPage({ projectCtx }) {
 
                 if (data.status === 'completed') {
                     clearInterval(intervalRef.current)
-                    setTimeout(() => navigate('/dashboard'), 1800)
+                    const actualProject = data.actual_project_name || data.project_name || projectCtx.projectName
+                    if (setProjectCtx) {
+                        setProjectCtx({ jobId: projectCtx.jobId, projectName: actualProject })
+                    }
+                    setTimeout(() => navigate(`/dashboard?project=${encodeURIComponent(actualProject)}`), 1800)
                 } else if (data.status === 'failed') {
                     clearInterval(intervalRef.current)
                     setError(data.error || 'Pipeline failed')
@@ -59,7 +63,7 @@ export default function ProcessingPage({ projectCtx }) {
         }, 2000)
 
         return () => clearInterval(intervalRef.current)
-    }, [projectCtx.jobId, navigate])
+    }, [projectCtx.jobId, projectCtx.projectName, setProjectCtx, navigate])
 
     const progress = Math.min(((completedSteps.length) / STEPS.length) * 100, 100)
 
