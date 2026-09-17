@@ -15,3 +15,6 @@ frontend/dist/
 
 # Excel lock files
 integrated_pm_assistant/~$*.xlsx
+
+# Frontend production build output
+integrated_pm_assistant/frontend/dist/
