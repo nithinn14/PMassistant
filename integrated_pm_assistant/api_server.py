@@ -602,16 +602,87 @@ def job_status(job_id):
     )
 
 
-@app.route("/api/project-results/<project_name>")
+def get_available_projects() -> List[str]:
+    """Scan OUTPUT_DIR and memory jobs to find all existing project names."""
+    names = set()
+    if OUTPUT_DIR.exists():
+        for f in OUTPUT_DIR.glob("*_PRD.json"):
+            if f.stem.endswith("_PRD"):
+                names.add(f.stem[:-4])
+        for suffix in ("_Tasks.xlsx", "_Assigned.xlsx", "_Scheduled.xlsx", "_PRD.pdf", "_workflow_state.yaml"):
+            stem_suffix = suffix.split(".")[0]
+            for f in OUTPUT_DIR.glob(f"*{suffix}"):
+                if f.stem.endswith(stem_suffix):
+                    names.add(f.stem[:-len(stem_suffix)])
+    for j in jobs.values():
+        if j.get("actual_project_name"):
+            names.add(j["actual_project_name"])
+        elif j.get("project_name"):
+            names.add(j["project_name"])
+    return sorted([n for n in names if n])
+
+
+def resolve_project_name(query: str) -> tuple[Optional[str], List[str]]:
+    """
+    Resolve a user query to matching existing projects.
+    Returns:
+        (canonical_name, []) if exactly 1 match
+        (None, [matches...]) if >1 matches (ambiguous)
+        (None, []) if 0 matches
+    """
+    # If query matches original_project_name of a renamed job, resolve first
+    for j in jobs.values():
+        if j.get("original_project_name") == query and j.get("actual_project_name"):
+            query = j["actual_project_name"]
+            break
+
+    clean_q = query.strip()
+    if not clean_q:
+        return None, []
+
+    available = get_available_projects()
+
+    # 1. Exact case-sensitive match
+    if clean_q in available:
+        return clean_q, []
+
+    # 2. Exact case-insensitive match
+    exact_ci = [p for p in available if p.lower() == clean_q.lower()]
+    if len(exact_ci) == 1:
+        return exact_ci[0], []
+    elif len(exact_ci) > 1:
+        return None, exact_ci
+
+    # 3. Partial / substring match (case-insensitive)
+    q_lower = clean_q.lower()
+    matches = [p for p in available if q_lower in p.lower()]
+    if len(matches) == 1:
+        return matches[0], []
+    elif len(matches) > 1:
+        return None, matches
+    else:
+        return None, []
+
+
+@app.route("/api/project-results/<path:project_name>")
 def project_results(project_name):
     import pandas as pd
 
-    # If project_name matches original_project_name of a renamed job, resolve to actual_project_name
-    for j in jobs.values():
-        if j.get("original_project_name") == project_name and j.get("actual_project_name"):
-            project_name = j["actual_project_name"]
-            break
+    canonical_name, ambiguous_matches = resolve_project_name(project_name)
 
+    if ambiguous_matches:
+        return _safe_jsonify({
+            "ambiguous": True,
+            "query": project_name,
+            "matches": ambiguous_matches,
+        }, 200)
+
+    if not canonical_name:
+        return _safe_jsonify({
+            "error": f"No project found matching '{project_name}'. Check the Projects page for available projects."
+        }, 404)
+
+    project_name = canonical_name
     result = {"project_name": project_name}
 
     # PRD JSON

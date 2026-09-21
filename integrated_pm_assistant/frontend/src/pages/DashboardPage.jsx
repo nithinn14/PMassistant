@@ -90,6 +90,7 @@ export default function DashboardPage({ projectCtx }) {
     const [data, setData] = useState(null)
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState(null)
+    const [ambiguousMatches, setAmbiguousMatches] = useState([])
     const [projectInput, setProjectInput] = useState(activeProject)
     const [syncing, setSyncing] = useState(false)
 
@@ -112,11 +113,23 @@ export default function DashboardPage({ projectCtx }) {
         if (!name) return
         setLoading(true)
         setError(null)
+        setAmbiguousMatches([])
         try {
             const res = await getProjectResults(name)
-            setData(res)
-        } catch {
-            setError('Could not load project results. Make sure the project exists and the API is running.')
+            if (res.ambiguous) {
+                setAmbiguousMatches(res.matches || [])
+                setData(null)
+            } else {
+                setData(res)
+                if (res.project_name && res.project_name !== activeProject) {
+                    setSearchParams({ project: res.project_name })
+                    setProjectInput(res.project_name)
+                }
+            }
+        } catch (err) {
+            const msg = err.response?.data?.error || `No project found matching "${name}". Check the Projects page for available projects.`
+            setError(msg)
+            setData(null)
         } finally {
             setLoading(false)
         }
@@ -125,9 +138,13 @@ export default function DashboardPage({ projectCtx }) {
     useEffect(() => {
         if (activeProject) {
             setProjectInput(activeProject)
-            loadResults(activeProject)
+            if (data?.project_name !== activeProject) {
+                loadResults(activeProject)
+            }
         } else {
             setData(null)
+            setError(null)
+            setAmbiguousMatches([])
             setLoading(false)
         }
     }, [activeProject])
@@ -174,7 +191,35 @@ export default function DashboardPage({ projectCtx }) {
                             Load
                         </button>
                     </div>
-                    {error && <div className="mt-4 text-sm text-accent-rose font-semibold">{error}</div>}
+                    {error && (
+                        <div className="mt-4 p-3.5 rounded-xl bg-accent-rose/10 border border-accent-rose/20 text-accent-rose text-sm font-semibold animate-fade-in-up">
+                            {error}
+                        </div>
+                    )}
+                    {ambiguousMatches.length > 0 && (
+                        <div className="mt-6 w-full text-left animate-fade-in-up">
+                            <p className="text-xs font-semibold uppercase tracking-wider text-surface-400 mb-2.5">
+                                Multiple projects match "{projectInput || activeProject}". Please select one:
+                            </p>
+                            <div className="flex flex-col gap-2 max-h-56 overflow-y-auto pr-1">
+                                {ambiguousMatches.map((name) => (
+                                    <button
+                                        key={name}
+                                        type="button"
+                                        onClick={() => handleManualLoad(name)}
+                                        className="flex items-center justify-between w-full px-4 py-3 text-sm font-medium text-surface-700 dark:text-surface-200 bg-surface-100/70 hover:bg-primary-50 dark:bg-surface-800/60 dark:hover:bg-primary-950/40 border border-surface-200/80 dark:border-surface-700/60 hover:border-primary-500/40 rounded-xl transition-all text-left group"
+                                    >
+                                        <span className="truncate group-hover:text-primary-600 dark:group-hover:text-primary-400 transition-colors">
+                                            {name}
+                                        </span>
+                                        <span className="text-xs text-surface-400 group-hover:text-primary-500 transition-colors font-semibold ml-2 shrink-0">
+                                            Select →
+                                        </span>
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+                    )}
                 </div>
             </div>
         )
