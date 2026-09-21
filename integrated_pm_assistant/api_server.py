@@ -636,6 +636,10 @@ def resolve_project_name(query: str) -> tuple[Optional[str], List[str]]:
             query = j["actual_project_name"]
             break
 
+    if not isinstance(query, str):
+        print(f"⚠️ resolve_project_name got a non-string query: {query!r} (type: {type(query).__name__})")
+        query = str(query[0]) if isinstance(query, list) and query else str(query)
+
     clean_q = query.strip()
     if not clean_q:
         return None, []
