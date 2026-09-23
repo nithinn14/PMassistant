@@ -128,6 +128,22 @@ class OutputCapture(io.StringIO):
             pass
 
 
+def _coerce_project_name_to_str(value) -> str:
+    """Ensure a value read from a PRD JSON 'product_name'/'project_name' field
+    is always a plain string, even if an old (pre-Bug-K-fix) file stored it as
+    a list due to the model schema-compliance issue.
+    - list, 1 item   -> unwrap
+    - list, >1 items -> space-join
+    - non-str        -> str()
+    - str            -> unchanged
+    """
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return " ".join(str(item) for item in value) if value else ""
+    return str(value) if value is not None else ""
+
+
 def find_actual_project_name(
     original_project_name: str,
     output_dir: Path = OUTPUT_DIR,
@@ -170,7 +186,8 @@ def find_actual_project_name(
                         try:
                             with open(json_path, "r", encoding="utf-8") as f:
                                 data = json.load(f)
-                                name = data.get("product_name") or data.get("project_name")
+                                raw = data.get("product_name") or data.get("project_name")
+                                name = _coerce_project_name_to_str(raw) if raw is not None else None
                                 if name:
                                     return name
                         except Exception:
@@ -198,7 +215,8 @@ def find_actual_project_name(
             try:
                 with open(latest_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    name = data.get("product_name") or data.get("project_name")
+                    raw = data.get("product_name") or data.get("project_name")
+                    name = _coerce_project_name_to_str(raw) if raw is not None else None
                     if name:
                         return name
             except Exception:
