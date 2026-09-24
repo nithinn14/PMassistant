@@ -18,3 +18,7 @@ integrated_pm_assistant/~$*.xlsx
 
 # Frontend production build output
 integrated_pm_assistant/frontend/dist/
+
+# Google OAuth credentials (secret, never commit)
+integrated_pm_assistant/credentials.json
+integrated_pm_assistant/token.json
