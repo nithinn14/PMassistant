@@ -139,9 +139,9 @@ export default function ResourcesPage({ projectCtx }) {
         )
     }
 
-    const assigned = data?.assigned || []
+    const assigned = data?.schedule || []
     const grouped = assigned.reduce((acc, t) => {
-        const name = t.Assigned_Employee || t.assigned_empl || 'Unassigned'
+        const name = t.assigned_empl || t.Assigned_Employee || 'Unassigned'
         if (!acc[name]) acc[name] = { email: t.assigned_email || t.Email || '', tasks: [] }
         acc[name].tasks.push(t.task_name || t.task || 'Task')
         return acc
