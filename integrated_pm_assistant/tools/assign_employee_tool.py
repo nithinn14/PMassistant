@@ -66,17 +66,21 @@ def _merge_tasks(existing_df: pd.DataFrame, incoming_tasks: List[Dict]) -> pd.Da
     if "task_id" not in incoming_df.columns:
         return incoming_df.copy()
 
-    # Index existing by task_id for O(1) lookup
-    existing_indexed = existing_df.set_index("task_id")
+    # Index existing by task_id for O(1) lookup (preserve task_id column)
+    existing_indexed = existing_df.set_index("task_id", drop=False)
 
     merged_rows = []
     for _, row in incoming_df.iterrows():
         tid = row.get("task_id")
         if tid in existing_indexed.index:
             existing_row = existing_indexed.loc[tid]
+            if isinstance(existing_row, pd.DataFrame):
+                existing_row = existing_row.iloc[0]
             # Keep existing row only if it is already properly assigned
             if not _is_unassigned(existing_row):
-                merged_rows.append(existing_row.to_dict())
+                row_dict = existing_row.to_dict()
+                row_dict["task_id"] = tid  # restore / ensure task_id is present
+                merged_rows.append(row_dict)
                 continue
         # Otherwise use the incoming (unassigned) row
         merged_rows.append(row.to_dict())
