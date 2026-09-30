@@ -16,7 +16,7 @@ OPTIONAL standalone mode (kept for testing / manual use):
       python telegram_bot.py
 
 Supported commands:
-  /add_employee          Interactive: Name -> Role -> Hours -> appends to employees.xlsx
+  /add_employee          Interactive: Name -> Role -> Hours -> Email -> appends to employees.xlsx
                          Writing to employees.xlsx triggers the mtime-watcher in
                          ResourceValidationAgent, which fires incremental assignment.
 
@@ -141,7 +141,7 @@ def _clear_state(chat_id: str) -> None:
 def handle_add_employee(bot: TelegramBot, chat_id: str, text: str) -> None:
     """
     Multi-step conversation to collect employee details.
-    State machine: idle -> await_name -> await_role -> await_hours -> done
+    State machine: idle -> await_name -> await_role -> await_hours -> await_email -> done
     """
     state = _get_state(chat_id)
     step = state.get("step")
@@ -171,9 +171,18 @@ def handle_add_employee(bot: TelegramBot, chat_id: str, text: str) -> None:
             return
 
         state["hours"] = hours
+        state["step"] = "await_email"
+        bot.send(chat_id, f"Available Hours: {hours}\n\nNow enter the employee's email (or type 'skip'):")
+        return
+    
+    if step == "await_email":
+        email_input = text.strip()
+        email = "" if email_input.lower() == "skip" else email_input        
+        
         name = state["name"]
         role = state["role"]
-
+        hours = state["hours"] 
+        
         # Write new employee to Excel via shared data backend
         import pandas as pd
         backend = get_backend()
@@ -188,7 +197,7 @@ def handle_add_employee(bot: TelegramBot, chat_id: str, text: str) -> None:
             "Free_Hours": hours,
             allocated_col: 0,
             "Current_Project": "",
-            "Email": "",  # PM can fill in later
+            "Email": email,
         }])
 
         # Append -- triggers mtime change on employees.xlsx -> auto-reassignment
@@ -200,10 +209,11 @@ def handle_add_employee(bot: TelegramBot, chat_id: str, text: str) -> None:
             f"Employee Added Successfully\n\n"
             f"Name: {name}\n"
             f"Role: {role}\n"
-            f"Available Hours: {hours}\n\n"
+            f"Available Hours: {hours}\n"
+            f"Email: {email or 'Not provided'}\n\n"
             f"The system will automatically reassign waiting tasks."
         )
-        print(f"Added employee '{name}' ({role}, {hours}h) -> employees.xlsx updated")
+        print(f"Added employee '{name}' ({role}, {hours}h, email: {email or 'none'}) -> employees.xlsx updated")
         return
 
     # Unknown step - reset
