@@ -167,7 +167,7 @@ def assign_resources(project_name: str, tasks: List[Dict[str, Any]]) -> Dict[str
 
         # Find eligible candidates — role match AND has free capacity
         candidates = employees_df[
-            (employees_df["Role"].astype(str).str.strip() == target_role)
+            (employees_df["Role"].astype(str).str.strip().str.lower() == target_role.strip().lower())
             & (employees_df["Free_Hours"] > 0)
         ]
 
