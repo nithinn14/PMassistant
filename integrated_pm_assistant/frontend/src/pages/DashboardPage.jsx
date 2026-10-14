@@ -242,7 +242,15 @@ export default function DashboardPage({ projectCtx }) {
 
     const totalTasks = data.tasks?.length || 0
     const totalEmployees = data.schedule ? [...new Set(data.schedule.map(s => s.assigned_empl))].length : 0
-    const totalNotifications = data.telegram_notifications?.length || 0
+    
+    const notifStatus = data.notification_status || null
+    const totalNotifications = notifStatus ? notifStatus.notified : 0
+    const reachedList = notifStatus ? [
+        ...(notifStatus.both || []).map((name) => ({ name, channel: 'Telegram + Email' })),
+        ...(notifStatus.telegram_only || []).map((name) => ({ name, channel: 'Telegram' })),
+        ...(notifStatus.email_only || []).map((name) => ({ name, channel: 'Email' })),
+    ] : []
+    const notReachedList = notifStatus ? (notifStatus.not_reached || []) : []
 
     return (
         <div className="p-5 lg:p-8 max-w-[1400px] mx-auto space-y-6">
@@ -414,20 +422,40 @@ export default function DashboardPage({ projectCtx }) {
                 </Section>
             )}
 
-            {/* ── Telegram Notifications ──────── */}
-            {data.telegram_notifications && (
-                <Section icon={Bell} title="Telegram Notifications" delay={450} badge={<Badge color="green">{data.telegram_notifications.length} sent</Badge>}>
+            {/* ── Notification Delivery ──────── */}
+            {notifStatus ? (
+                <Section icon={Bell} title="Notification Delivery" delay={450} badge={<Badge color="green">{notifStatus.notified} of {notifStatus.total} notified</Badge>}>
+                    <p className="text-xs text-surface-400 font-semibold mb-3">
+                        {notifStatus.email_count} via Email, {notifStatus.telegram_count} via Telegram, {notReachedList.length} not reached
+                    </p>
                     <div className="flex flex-wrap gap-2">
-                        {data.telegram_notifications.map((name, i) => (
+                        {reachedList.map((item) => (
                             <div
-                                key={i}
+                                key={item.name}
                                 className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl bg-accent-emerald/5 border border-accent-emerald/10 hover:bg-accent-emerald/10 transition-colors"
                             >
                                 <CheckCircle2 className="w-3.5 h-3.5 text-accent-emerald" />
-                                <span className="text-sm font-semibold text-accent-emerald">{name}</span>
+                                <span className="text-sm font-semibold text-accent-emerald">{item.name}</span>
+                                <span className="text-[10px] text-surface-400 font-medium">{item.channel}</span>
+                            </div>
+                        ))}
+                        {notReachedList.map((name) => (
+                            <div
+                                key={name}
+                                className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl bg-accent-rose/5 border border-accent-rose/10"
+                            >
+                                <span className="text-sm font-bold text-accent-rose">✕</span>
+                                <span className="text-sm font-semibold text-accent-rose">{name}</span>
+                                <span className="text-[10px] text-surface-400 font-medium">Not reached</span>
                             </div>
                         ))}
                     </div>
+                </Section>
+            ) : (
+                <Section icon={Bell} title="Notification Delivery" delay={450}>
+                    <p className="text-sm text-surface-500 font-semibold">
+                        Delivery tracking isn't available for this project. Run it again to see real results.
+                    </p>
                 </Section>
             )}
 

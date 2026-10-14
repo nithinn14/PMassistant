@@ -734,10 +734,29 @@ def project_results(project_name):
         df = df.where(pd.notnull(df), None)
         result["schedule"] = df.to_dict(orient="records")
 
-        # Extract telegram notifications from the scheduled data
-        if "assigned_empl" in df.columns:
-            notified = df["assigned_empl"].dropna().unique().tolist()
-            result["telegram_notifications"] = notified
+
+    # Notification delivery status (real results, written by save_schedule_tool)
+    status_path = OUTPUT_DIR / f"{project_name}_notification_status.json"
+    if status_path.exists():
+        try:
+            with open(status_path, "r", encoding="utf-8") as f:
+                status = json.load(f)
+            both = [n for n, s in status.items() if s.get("telegram_sent") and s.get("email_sent")]
+            telegram_only = [n for n, s in status.items() if s.get("telegram_sent") and not s.get("email_sent")]
+            email_only = [n for n, s in status.items() if s.get("email_sent") and not s.get("telegram_sent")]
+            not_reached = [n for n, s in status.items() if not s.get("telegram_sent") and not s.get("email_sent")]
+            result["notification_status"] = {
+                "both": both,
+                "telegram_only": telegram_only,
+                "email_only": email_only,
+                "not_reached": not_reached,
+                "total": len(status),
+                "notified": len(both) + len(telegram_only) + len(email_only),
+                "telegram_count": len(both) + len(telegram_only),
+                "email_count": len(both) + len(email_only),
+            }
+        except Exception as exc:
+            print(f"⚠️ Could not read notification status: {exc}")
 
     # Meetings
     meetings_path = OUTPUT_DIR / f"{project_name}_Meetings.xlsx"

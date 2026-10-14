@@ -97,6 +97,14 @@ def save_schedule(input_json: str) -> str:
     print(f"\u2705 Schedule saved: {project_name}_Scheduled")
 
 
+    # ── Notification delivery tracking ────────────────────────────────────────
+    telegram_sent = set()
+    email_sent = set()
+    all_employees = set(
+        str(e).strip()
+        for e in df["assigned_empl"].dropna().unique()
+        if str(e).strip() != "No Resource Available"
+    )
     # ── Telegram task-assignment DMs ────────────────────────────────────────
     try:
         from agents.communication.notifiers.telegram_notifier import TelegramNotifier
@@ -140,11 +148,61 @@ def save_schedule(input_json: str) -> str:
                             f"📋 *Your Tasks:*\n" + "\n".join(task_lines) + "\n\n"
                             f"📧 Check your email for full details\\."
                         )
-                        tg.send_to_chat(chat_id, msg, name=emp_name_str)
+                        success = tg.send_to_chat(chat_id, msg, name=emp_name_str)
+                        if success:
+                            telegram_sent.add(emp_name_str)
     except Exception as tg_err:
         print(f"⚠️ Telegram task-assignment DMs skipped: {tg_err}")
 
-    return json.dumps({"project_name": project_name, "tasks": df.to_dict(orient="records")}, default=str)
+    # ── Email task-assignment notifications ────────────────────────────────────
+    try:
+        from agents.communication.factory import build_email_notifier
 
+        email_notifier = build_email_notifier(config)
+
+        for emp_name, emp_tasks in df.groupby("assigned_empl"):
+            emp_name_str = str(emp_name).strip()
+            emp_email = str(emp_tasks.iloc[0].get("assigned_email", "")).strip()
+            if not emp_email or emp_email.lower() in ("", "nan", "none"):
+                continue
+
+            task_lines = []
+            for _, row in emp_tasks.iterrows():
+                t_name = row.get("task_name", row.get("task", "Task"))
+                t_start = row.get("start_date", "")
+                t_end = row.get("end_date", "")
+                task_lines.append(f"  - {str(t_name)} ({t_start} to {t_end})")
+
+            subject = f"Task Assignment: {project_name}"
+            body = (
+                f"Hello {emp_name_str},\n\n"
+                f"You have been assigned to {project_name}.\n\n"
+                f"Your Tasks:\n" + "\n".join(task_lines) + "\n\n"
+                f"Please check with your Project Manager for further details."
+            )
+            success = email_notifier.send(to_email=emp_email, subject=subject, message=body)
+            if success:
+                email_sent.add(emp_name_str)
+    except Exception as email_err:
+        print(f"⚠️ Task-assignment emails skipped: {email_err}")
+
+    # ── Write notification delivery status ──────────────────────────────────
+    try:
+        notification_status = {}
+        for emp in all_employees:
+            notification_status[emp] = {
+                "telegram_sent": emp in telegram_sent,
+                "email_sent": emp in email_sent,
+            }
+        output_dir = Path(__file__).resolve().parents[1] / "output"
+        output_dir.mkdir(exist_ok=True)
+        status_path = output_dir / f"{project_name}_notification_status.json"
+        with open(status_path, "w", encoding="utf-8") as f:
+            json.dump(notification_status, f, indent=2)
+        print(f"📋 Notification status saved: {status_path}")
+    except Exception as status_err:
+        print(f"⚠️ Could not save notification status: {status_err}")
+
+    return json.dumps({"project_name": project_name, "tasks": df.to_dict(orient="records")}, default=str)
 
 save_schedule_tool = FunctionTool(save_schedule)
