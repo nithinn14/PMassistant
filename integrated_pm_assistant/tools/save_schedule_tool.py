@@ -61,7 +61,9 @@ def save_schedule(input_json: str) -> str:
     email_map = dict(zip(employees_df["Employee_Name"], employees_df["Email"]))
 
     config = load_config()
-    project_start = datetime.now().date()
+    
+    now = datetime.now()
+    project_start = now.date() if now.hour < 9 else (now + timedelta(days=1)).date()
 
     pm_candidates = employees_df[
         employees_df["Role"].str.contains("Project Manager", case=False, na=False)
