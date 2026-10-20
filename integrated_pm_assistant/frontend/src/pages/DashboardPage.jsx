@@ -387,11 +387,11 @@ export default function DashboardPage({ projectCtx }) {
             )}
 
             {/* ── Resource Assignments ──────── */}
-            {data.schedule && (
+            {(data.schedule || data.assigned) && (
                 <Section icon={Users} title="Resource Assignments" delay={400}>
                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
                         {Object.entries(
-                            data.schedule.reduce((acc, t) => {
+                            (data.schedule || data.assigned).reduce((acc, t) => {
                                 const name = t.assigned_empl || t.Assigned_Employee || 'Unassigned'
                                 if (!acc[name]) acc[name] = { email: t.assigned_email || t.Email || '', tasks: [] }
                                 acc[name].tasks.push(t.task_name || t.task || 'Task')
