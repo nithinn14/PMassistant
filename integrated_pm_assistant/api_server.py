@@ -559,7 +559,8 @@ def start_project():
 
     if not project_name or not project_description:
         return jsonify({"error": "project_name and project_description are required"}), 400
-
+    if backend_choice not in ("excel", "csv", "sql", "odoo"):
+        return jsonify({"error": f"data_backend must be one of: excel, csv, sql, odoo (got '{backend_choice}')"}), 400
     # 1. Update config.yaml backend type
     try:
         config_path = BASE_DIR / "config.yaml"
