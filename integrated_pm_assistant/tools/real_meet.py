@@ -177,6 +177,46 @@ def notify_project_level_meetings(task_excel_path: str, project_name: str, meeti
         new_participants_df.to_excel(participant_file, index=False)
 
     print(f"✅ {meeting_type} meeting created successfully")
+    
+    # ── Meeting email with join link (in addition to the Google Calendar invite) ──
+    try:
+        from config_loader import load_config
+        from agents.communication.factory import build_email_notifier
+
+        mailer = build_email_notifier(load_config())
+        meet_link = meeting.get("meet_link")
+        when_date = meeting_time.strftime("%A, %d %B %Y")
+        when_time = f"{meeting_time.strftime('%H:%M')} - {meeting_end.strftime('%H:%M')} IST"
+
+        meeting_mail_sent, meeting_mail_failed = [], []
+        for email in participants:
+            person_rows = df[df["assigned_email"] == email]
+            person = str(person_rows.iloc[0].get("assigned_empl", "")).strip() if not person_rows.empty else ""
+            greeting = f"Hello {person}," if person and person.lower() != "nan" else "Hello,"
+            link_line = (
+                f"Join here: {meet_link}"
+                if meet_link
+                else "The join link is in the Google Calendar invite."
+            )
+            body = (
+                f"{greeting}\n\n"
+                f"A {meeting_type} meeting has been scheduled for the project {project_name}.\n\n"
+                f"Date: {when_date}\n"
+                f"Time: {when_time}\n"
+                f"{link_line}\n\n"
+                f"You will also receive a Google Calendar invite. Please respond to that invite "
+                f"(Yes / No / Maybe) so your RSVP is recorded.\n\n"
+                f"- PM Assistant"
+            )
+            ok = mailer.send(
+                to_email=str(email).strip(),
+                subject=f"{meeting_type} Meeting: {project_name}",
+                message=body,
+            )
+            (meeting_mail_sent if ok else meeting_mail_failed).append(str(email))
+        print(f"📧 Meeting emails: {len(meeting_mail_sent)} sent, {len(meeting_mail_failed)} failed")
+    except Exception as mail_err:
+        print(f"⚠️ Meeting emails skipped: {mail_err}")
 
     # ── Telegram notifications ──────────────────────────────────────────────
     try:
