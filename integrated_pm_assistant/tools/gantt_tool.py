@@ -52,9 +52,15 @@ def _add_work_days(start, n):
  
 def _apply_dependency_scheduling(df, project_start):
     """
-    Schedule tasks by their dependencies: a task with no dependencies starts on
-    the project start date; any other task starts on the working day after the
-    last of its dependencies ends. Task length (in working days) is kept.
+    Schedule tasks by their dependencies and by who does them:
+      - a task with no dependencies can start on the project start date;
+      - any other task can start on the working day after the last of its
+        dependencies ends;
+      - one person works on one task at a time, so a person's next task starts
+        on the working day after their previous one ends (a task with nobody
+        assigned never blocks anyone).
+    Task length (in working days) is kept. Among the tasks that are ready, the
+    one that can start earliest goes first (ties: original task order).
     """
     df = df.copy()
     project_start = pd.Timestamp(project_start)
@@ -73,31 +79,52 @@ def _apply_dependency_scheduling(df, project_start):
         return str(tid).strip()
     df["_key"] = df.apply(_key, axis=1)
  
+    # Who does each task (None when nobody is assigned).
+    who_col = next((c for c in ("assigned_empl", "Assigned_Employee") if c in df.columns), None)
+ 
+    def _who(i):
+        if who_col is None:
+            return None
+        v = df.at[i, who_col]
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            return None
+        v = str(v).strip()
+        if v == "" or v.lower() in ("nan", "none", "no resource available"):
+            return None
+        return v
+ 
     # Length of each task in working days, measured BEFORE any date is changed.
     lengths = {i: _work_days(df.at[i, "start_date"], df.at[i, "end_date"]) for i in df.index}
  
     end_dates = {}
+    person_free = {}
     pending = list(df.index)
     while pending:
-        progressed = False
-        for i in list(pending):
+        ready = []
+        for order, i in enumerate(pending):
             deps = df.at[i, "dependencies"]
             if all(d in end_dates for d in deps):
+                earliest = project_start
                 if deps:
-                    start = _add_work_days(max(end_dates[d] for d in deps), 1)
-                else:
-                    start = _add_work_days(project_start, 0)
-                end = _add_work_days(start, lengths[i] - 1)
-                df.at[i, "start_date"], df.at[i, "end_date"] = start, end
-                end_dates[df.at[i, "_key"]] = end
-                pending.remove(i)
-                progressed = True
-        if not progressed:
+                    earliest = max(end_dates[d] for d in deps) + pd.Timedelta(days=1)
+                who = _who(i)
+                if who in person_free:
+                    earliest = max(earliest, person_free[who])
+                ready.append((_add_work_days(earliest, 0), order, i))
+        if not ready:
             stuck = {df.at[i, "_key"]: [d for d in df.at[i, "dependencies"] if d not in end_dates]
                      for i in pending}
             print("Warning: could not schedule these tasks (circular dependency, or a dependency "
                   f"that does not exist). They keep their original dates: {stuck}")
             break
+        start, _, i = min(ready)
+        end = _add_work_days(start, lengths[i] - 1)
+        df.at[i, "start_date"], df.at[i, "end_date"] = start, end
+        end_dates[df.at[i, "_key"]] = end
+        who = _who(i)
+        if who:
+            person_free[who] = _add_work_days(end, 1)
+        pending.remove(i)
  
     return df.drop(columns=["_key"])
 

@@ -87,6 +87,17 @@ def save_schedule(input_json: str) -> str:
 
     df["start_date"] = start_dates
     df["end_date"] = end_dates
+
+    # Replace the one-after-another queue with a dependency-based plan, using the
+    # same logic as the Gantt chart, so every page and email shows the same dates.
+    try:
+        from tools.gantt_tool import _apply_dependency_scheduling
+        planned = _apply_dependency_scheduling(df, project_start)
+        df["start_date"] = planned["start_date"].dt.date
+        df["end_date"] = planned["end_date"].dt.date
+    except Exception as plan_err:
+        print(f"⚠️ Dependency scheduling skipped, keeping sequential dates: {plan_err}")
+
     df["assigned_email"] = df["assigned_empl"].map(email_map)
     df["project_manager"] = pm_name
     df["project_manager_email"] = pm_email
