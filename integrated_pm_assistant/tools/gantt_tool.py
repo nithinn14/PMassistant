@@ -5,6 +5,9 @@ import re
 from pathlib import Path
 from google.adk.tools.function_tool import FunctionTool
 
+import ast
+import numpy as np
+
 def _safe_json_parse(raw_input):
     if isinstance(raw_input, dict): return raw_input
     raw_str = str(raw_input)
@@ -13,71 +16,90 @@ def _safe_json_parse(raw_input):
     cleaned = re.sub(r'\bNaN\b', 'null', match.group(0))
     return json.loads(cleaned)
 
-
+def _parse_deps(dep):
+    """Accepts a real list, JSON text '["TASK-001"]', or Python-style text "['TASK-001']"."""
+    if isinstance(dep, (list, tuple)):
+        return [str(d).strip() for d in dep if str(d).strip()]
+    if dep is None or (isinstance(dep, float) and pd.isna(dep)):
+        return []
+    if isinstance(dep, str):
+        text = dep.strip()
+        if not text:
+            return []
+        for loader in (json.loads, ast.literal_eval):
+            try:
+                value = loader(text)
+            except Exception:
+                continue
+            if isinstance(value, (list, tuple)):
+                return [str(d).strip() for d in value if str(d).strip()]
+            if isinstance(value, str) and value.strip():
+                return [value.strip()]
+        parts = re.split(r"[,\s]+", text.strip("[]"))
+        return [p.strip("'\"") for p in parts if p.strip("'\"")]
+    return []
+ 
+ 
+def _work_days(start, end):
+    """Working days from start to end, both included (at least 1)."""
+    return max(int(np.busday_count(start.date(), (end + pd.Timedelta(days=1)).date())), 1)
+ 
+ 
+def _add_work_days(start, n):
+    """The date n working days after start (n=0 is start itself, moved off a weekend)."""
+    return pd.Timestamp(np.busday_offset(start.date(), n, roll="forward"))
+ 
+ 
 def _apply_dependency_scheduling(df, project_start):
     """
-    FIXED: True parallel scheduling for independent tasks
+    Schedule tasks by their dependencies: a task with no dependencies starts on
+    the project start date; any other task starts on the working day after the
+    last of its dependencies ends. Task length (in working days) is kept.
     """
-
     df = df.copy()
-    end_dates = {}
-
-    # Normalize dependencies column
+    project_start = pd.Timestamp(project_start)
+    df["start_date"] = pd.to_datetime(df["start_date"])
+    df["end_date"] = pd.to_datetime(df["end_date"])
+ 
     if "dependencies" not in df.columns:
         df["dependencies"] = [[] for _ in range(len(df))]
-
-    # Convert string dependencies to list
-    def parse_deps(dep):
-        if isinstance(dep, str):
-            try:
-                return json.loads(dep)
-            except:
-                return []
-        return dep if isinstance(dep, list) else []
-
-    df["dependencies"] = df["dependencies"].apply(parse_deps)
-
-    # 🔥 STEP 1: Handle tasks with NO dependencies (PARALLEL)
-    no_dep_mask = df["dependencies"].apply(lambda x: len(x) == 0)
-
-    df.loc[no_dep_mask, "start_date"] = project_start
-
-    for idx in df[no_dep_mask].index:
-        duration = (df.at[idx, "end_date"] - df.at[idx, "start_date"]).days
-        df.at[idx, "end_date"] = df.at[idx, "start_date"] + pd.Timedelta(days=duration)
-        end_dates[df.at[idx, "task_name"]] = df.at[idx, "end_date"]
-
-    # 🔥 STEP 2: Handle dependent tasks (ITERATIVE, NOT SEQUENTIAL ORDER)
-    unresolved = df[~no_dep_mask].copy()
-
-    while not unresolved.empty:
-        resolved_in_this_pass = False
-        for idx, row in unresolved.iterrows():
-            deps = row["dependencies"]
-
-            # Check if all dependencies are already scheduled
-            if all(dep in end_dates for dep in deps):
-                start = max(end_dates[dep] for dep in deps)
-
-                duration = (row["end_date"] - row["start_date"]).days
-                end = start + pd.Timedelta(days=duration)
-
-                df.at[idx, "start_date"] = start
-                df.at[idx, "end_date"] = end
-
-                end_dates[row["task_name"]] = end
-                resolved_in_this_pass = True
-
-        if not resolved_in_this_pass:
-            print(f"⚠️ Warning: Circular dependency or missing task detected. Stopping scheduling for: {unresolved['task_name'].tolist()}")
+    df["dependencies"] = df["dependencies"].apply(_parse_deps)
+ 
+    # Identify each task by task_id; fall back to the name when the id is missing.
+    def _key(row):
+        tid = row.get("task_id")
+        if tid is None or (isinstance(tid, float) and pd.isna(tid)) or not str(tid).strip():
+            return str(row["task_name"])
+        return str(tid).strip()
+    df["_key"] = df.apply(_key, axis=1)
+ 
+    # Length of each task in working days, measured BEFORE any date is changed.
+    lengths = {i: _work_days(df.at[i, "start_date"], df.at[i, "end_date"]) for i in df.index}
+ 
+    end_dates = {}
+    pending = list(df.index)
+    while pending:
+        progressed = False
+        for i in list(pending):
+            deps = df.at[i, "dependencies"]
+            if all(d in end_dates for d in deps):
+                if deps:
+                    start = _add_work_days(max(end_dates[d] for d in deps), 1)
+                else:
+                    start = _add_work_days(project_start, 0)
+                end = _add_work_days(start, lengths[i] - 1)
+                df.at[i, "start_date"], df.at[i, "end_date"] = start, end
+                end_dates[df.at[i, "_key"]] = end
+                pending.remove(i)
+                progressed = True
+        if not progressed:
+            stuck = {df.at[i, "_key"]: [d for d in df.at[i, "dependencies"] if d not in end_dates]
+                     for i in pending}
+            print("Warning: could not schedule these tasks (circular dependency, or a dependency "
+                  f"that does not exist). They keep their original dates: {stuck}")
             break
-
-        # Remove resolved tasks
-        unresolved = df[
-            df["task_name"].apply(lambda x: x not in end_dates)
-        ]
-
-    return df
+ 
+    return df.drop(columns=["_key"])
 
 def generate_gantt_chart(input_json: str) -> str:
     try:
