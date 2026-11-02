@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import math
 import yaml
 import pandas as pd
 from pathlib import Path
@@ -23,9 +24,16 @@ def _parse_json(raw_input):
 
 
 def add_working_days(start_date, days):
+    try:
+        val = float(days)
+    except (TypeError, ValueError):
+        val = 1.0
+    days_count = max(1, math.ceil(val))
     current = start_date
+    while current.weekday() >= 5:
+        current += timedelta(days=1)
     added = 0
-    while added < int(days):
+    while added < days_count - 1:
         current += timedelta(days=1)
         if current.weekday() < 5:
             added += 1

@@ -2,6 +2,7 @@ import pandas as pd
 import plotly.express as px
 import json
 import re
+import math
 from pathlib import Path
 from google.adk.tools.function_tool import FunctionTool
 
@@ -63,9 +64,15 @@ def _apply_dependency_scheduling(df, project_start):
     one that can start earliest goes first (ties: original task order).
     """
     df = df.copy()
-    project_start = pd.Timestamp(project_start)
-    df["start_date"] = pd.to_datetime(df["start_date"])
-    df["end_date"] = pd.to_datetime(df["end_date"])
+    project_start = _add_work_days(pd.Timestamp(project_start), 0)
+    if "start_date" in df.columns:
+        df["start_date"] = pd.to_datetime(df["start_date"])
+    else:
+        df["start_date"] = pd.NaT
+    if "end_date" in df.columns:
+        df["end_date"] = pd.to_datetime(df["end_date"])
+    else:
+        df["end_date"] = pd.NaT
  
     if "dependencies" not in df.columns:
         df["dependencies"] = [[] for _ in range(len(df))]
@@ -93,9 +100,39 @@ def _apply_dependency_scheduling(df, project_start):
             return None
         return v
  
-    # Length of each task in working days, measured BEFORE any date is changed.
-    lengths = {i: _work_days(df.at[i, "start_date"], df.at[i, "end_date"]) for i in df.index}
- 
+    # Length of each task in working days.
+    # Valid positive time_days uses ceiling rounding.
+    # Invalid durations produce a warning and fall back to existing dates,
+    # or to a safe minimum of 1 working day.
+    lengths = {}
+    for i in df.index:
+        td = df.at[i, "time_days"] if "time_days" in df.columns else None
+
+        if pd.notna(td):
+            try:
+                val = float(td)
+                if math.isfinite(val) and val > 0:
+                    lengths[i] = max(1, math.ceil(val))
+                    continue
+
+                print(
+                    f"Warning: task {df.at[i, '_key']} has invalid "
+                    f"time_days={td!r}. Using existing dates or a 1-day minimum."
+                )
+            except (ValueError, TypeError, OverflowError):
+                print(
+                    f"Warning: task {df.at[i, '_key']} has invalid "
+                    f"time_days={td!r}. Using existing dates or a 1-day minimum."
+                )
+
+        s = df.at[i, "start_date"]
+        e = df.at[i, "end_date"]
+
+        if pd.notna(s) and pd.notna(e):
+            lengths[i] = _work_days(pd.Timestamp(s), pd.Timestamp(e))
+        else:
+            lengths[i] = 1
+
     end_dates = {}
     person_free = {}
     pending = list(df.index)
@@ -106,11 +143,12 @@ def _apply_dependency_scheduling(df, project_start):
             if all(d in end_dates for d in deps):
                 earliest = project_start
                 if deps:
-                    earliest = max(end_dates[d] for d in deps) + pd.Timedelta(days=1)
+                    dep_free = max(_add_work_days(end_dates[d], 1) for d in deps)
+                    earliest = max(earliest, dep_free)
                 who = _who(i)
                 if who in person_free:
                     earliest = max(earliest, person_free[who])
-                ready.append((_add_work_days(earliest, 0), order, i))
+                ready.append((earliest, order, i))
         if not ready:
             stuck = {df.at[i, "_key"]: [d for d in df.at[i, "dependencies"] if d not in end_dates]
                      for i in pending}

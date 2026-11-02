@@ -13,7 +13,22 @@ Usage in tools/agents:
     backend.write("MyProject_Tasks", df)
 """
 
-from data_backend.registry import get_backend, reset_backend, BackendFactory
+from data_backend.registry import (
+    get_backend,
+    reset_backend,
+    create_backend,
+    bind_backend,
+    reset_bound_backend,
+    BackendFactory,
+)
 from data_backend.base import DataBackend
 
-__all__ = ["get_backend", "reset_backend", "BackendFactory", "DataBackend"]
+__all__ = [
+    "get_backend",
+    "reset_backend",
+    "create_backend",
+    "bind_backend",
+    "reset_bound_backend",
+    "BackendFactory",
+    "DataBackend",
+]

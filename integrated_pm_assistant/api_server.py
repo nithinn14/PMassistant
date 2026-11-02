@@ -11,7 +11,7 @@ Endpoints:
     GET  /api/download/<filename>    → serve output files
 """
 
-import json, os, sys, re, io, uuid, threading, time, math, asyncio, yaml
+import json, os, sys, re, io, uuid, threading, time, math, asyncio, yaml, contextvars
 from typing import Optional, Dict, Any, List
 from pathlib import Path
 from datetime import datetime
@@ -35,7 +35,6 @@ OUTPUT_DIR = BASE_DIR / "output"
 
 app = Flask(__name__)
 CORS(app, origins=["http://localhost:5173", "http://127.0.0.1:5173"])
-
 
 def _sanitize(obj):
     """Recursively replace NaN / Infinity with None so JSON is valid."""
@@ -78,8 +77,12 @@ class OutputCapture(io.StringIO):
     def __init__(self, job_id: str):
         super().__init__()
         self.job_id = job_id
-        self._real_stdout = sys.stdout
+        # Reach through any installed router to get the real terminal stdout,
+        # so that OutputCapture.write() (called only in legacy/direct paths)
+        # does not re-enter the router.
+        self._real_stdout = getattr(sys.stdout, "_orig", sys.stdout)
         self.lines: list[str] = []
+        self._line_buf: str = ""  # accumulates partial writes from JobOutputRouter
 
     def write(self, text: str):
         self._real_stdout.write(text)
@@ -126,6 +129,158 @@ class OutputCapture(io.StringIO):
                     job["project_name"] = actual_name
         except Exception:
             pass
+
+
+# ── Per-job context variable ─────────────────────────────────────────────────
+# Set to the current job_id at the start of each _run_pipeline thread; reset
+# in the finally block.  No value (None) means "not inside a pipeline thread".
+_current_job_id_var: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "_current_job_id_var", default=None
+)
+
+# Lock used only to guard list.append() in the router (list.append is
+# thread-safe in CPython, but we protect it for portability).
+_router_lock = threading.Lock()
+
+
+class JobOutputRouter(io.TextIOBase):
+    """
+    Process-wide stdout replacement that routes each write() call to the
+    per-job OutputCapture stored in jobs[job_id]["_capture"], identified via
+    _current_job_id_var.
+
+    Rules:
+    - Installed ONCE at module load; never replaced per-job.
+    - Each pipeline thread sets _current_job_id_var at entry and resets it in
+      finally, so no sys.stdout assignment is needed per job.
+    - If no job context is active (e.g. Flask request handler, standalone
+      print), output falls through to _original_stdout unchanged.
+    - A thread-local re-entrancy guard prevents infinite recursion if the
+      router's own flush() or the original stdout's write() triggers another
+      write through the same router.
+    - Partial writes (text without a newline, e.g. the newline that Python's
+      print() sends as a separate write()) are accumulated in a per-job buffer
+      and flushed as a complete line when '\\n' arrives, preserving the same
+      line-strip and step-detection logic that OutputCapture uses.
+    """
+
+    def __init__(self, original_stdout: io.TextIOBase):
+        # Do NOT call super().__init__() — TextIOBase.__init__ would mark the
+        # stream as closed, which breaks isatty() and similar checks.
+        self._orig = original_stdout
+        # Per-thread re-entrancy guard (bool stored in thread-local storage)
+        self._in_write = threading.local()
+
+    # ------------------------------------------------------------------
+    # io.TextIOBase required interface
+    # ------------------------------------------------------------------
+
+    @property
+    def encoding(self) -> str:
+        return getattr(self._orig, "encoding", "utf-8") or "utf-8"
+
+    @property
+    def errors(self) -> str:
+        return getattr(self._orig, "errors", "replace") or "replace"
+
+    def isatty(self) -> bool:
+        return False
+
+    def readable(self) -> bool:
+        return False
+
+    def writable(self) -> bool:
+        return True
+
+    def flush(self) -> None:
+        # Only flush the original stdout; per-job buffers are flushed inline.
+        try:
+            self._orig.flush()
+        except Exception:
+            pass
+
+    def reconfigure(self, **kwargs) -> None:
+        """Delegate reconfigure() to the underlying real stdout if it supports it.
+
+        sys.stdout.reconfigure(encoding='utf-8') is called at module import
+        time (line 20) on the real stdout before the router is installed, so
+        that call always works.  Any subsequent call (e.g. from a library that
+        expects sys.stdout to be reconfigurable) lands here; we delegate safely
+        and swallow AttributeError so callers are never broken.
+        """
+        reconfigure_fn = getattr(self._orig, "reconfigure", None)
+        if callable(reconfigure_fn):
+            try:
+                reconfigure_fn(**kwargs)
+            except Exception:
+                pass  # Best-effort; silently ignore if the underlying stream refuses
+
+    # ------------------------------------------------------------------
+    # Core routing logic
+    # ------------------------------------------------------------------
+
+    def write(self, text: str) -> int:
+        if not isinstance(text, str):
+            text = str(text)
+
+        # Re-entrancy guard: if this thread is already inside write(), fall
+        # through to the original stdout immediately to avoid infinite loops.
+        if getattr(self._in_write, "active", False):
+            try:
+                return self._orig.write(text)
+            except Exception:
+                return len(text)
+
+        self._in_write.active = True
+        try:
+            job_id: Optional[str] = _current_job_id_var.get()
+
+            if job_id is None:
+                # Not inside a pipeline thread — pass straight through.
+                try:
+                    return self._orig.write(text)
+                except Exception:
+                    return len(text)
+
+            job = jobs.get(job_id)
+            capture: Optional[OutputCapture] = job.get("_capture") if job else None
+
+            if capture is None:
+                # Job exists but capture not set up yet (race at thread start),
+                # or job is unknown.  Emit to real stdout so nothing is lost.
+                try:
+                    return self._orig.write(text)
+                except Exception:
+                    return len(text)
+
+            # Also mirror to terminal so the developer console still shows output.
+            try:
+                self._orig.write(text)
+            except Exception:
+                pass
+
+            # Accumulate text into the per-job line buffer, then process
+            # complete lines.  This handles Python print() which calls
+            # write(message) then write('\\n') as two separate calls.
+            capture._line_buf += text
+            while "\n" in capture._line_buf:
+                line, capture._line_buf = capture._line_buf.split("\n", 1)
+                stripped = line.strip()
+                if stripped:
+                    with _router_lock:
+                        capture.lines.append(stripped)
+                    capture._update_step(stripped)
+
+            return len(text)
+        finally:
+            self._in_write.active = False
+
+
+# Install the process-wide router exactly once, replacing sys.stdout.
+# All subsequent print() calls in any thread are now routed through this
+# object.  Per-job routing happens via _current_job_id_var.
+_stdout_router: JobOutputRouter = JobOutputRouter(sys.stdout)
+sys.stdout = _stdout_router
 
 
 def _coerce_project_name_to_str(value) -> str:
@@ -331,14 +486,23 @@ def verify_pipeline_output(
     }
 
 
-def _run_pipeline(job_id: str, project_name: str, project_description: str):
+def _run_pipeline(job_id: str, project_name: str, project_description: str, backend_choice: str = "excel"):
     """Runs the ADK orchestrator in a background thread with automatic retry on 429."""
     job = jobs[job_id]
+
+    # Create a per-job OutputCapture and store it on the job dict so that the
+    # process-wide JobOutputRouter can find it via _current_job_id_var.
     capture = OutputCapture(job_id)
-    old_stdout = sys.stdout
-    sys.stdout = capture
+    job["_capture"] = capture
+
+    # Bind this thread's job-id in the context var so the router routes to us.
+    # Do NOT assign sys.stdout — the router is already installed process-wide.
+    # Initialized to None so the finally block can safely guard the reset.
+    job_id_token = None
+    job_id_token = _current_job_id_var.set(job_id)
 
     MAX_RETRIES = 5
+    backend_token = None
 
     try:
         from google.adk import Runner
@@ -346,9 +510,17 @@ def _run_pipeline(job_id: str, project_name: str, project_description: str):
         from google.genai.types import Content, Part
         from agents.orchestrator_agent import build_orchestrator
         from config_loader import load_config
+        from data_backend import create_backend, bind_backend
 
         config = load_config(str(BASE_DIR / "config.yaml"))
         model_name = config.get("models", {}).get("default", "gemini-2.0-flash")
+
+        # Create and bind the job-specific DataBackend in memory
+        if "data_backend" in config:
+            backend_cfg = dict(config["data_backend"])
+            backend_cfg["type"] = backend_choice
+            pipeline_backend = create_backend(backend_cfg)
+            backend_token = bind_backend(pipeline_backend)
 
         payload = json.dumps(
             {
@@ -540,7 +712,28 @@ def _run_pipeline(job_id: str, project_name: str, project_description: str):
             job["error"] = f"Error in {job.get('current_step', 'Initialization')}: {err_msg}"
         job["logs"] = capture.lines
     finally:
-        sys.stdout = old_stdout
+        if backend_token is not None:
+            from data_backend import reset_bound_backend
+            reset_bound_backend(backend_token)
+        # Flush any partial line still in the capture buffer before finalizing logs.
+        # This ensures output from early-return paths is not silently discarded.
+        if capture._line_buf.strip():
+            capture.lines.append(capture._line_buf.strip())
+            capture._line_buf = ""
+        # Unconditionally sync job["logs"] so callers always see the latest
+        # captured lines, including when the pipeline exits early or raises.
+        # Only overwrite if capture.lines is non-empty or job["logs"] is still
+        # the empty list created at job inception (avoids replacing richer logs
+        # that an explicit assignment earlier in the try block may have set to
+        # an equivalent reference, while still updating on early-return paths
+        # where no explicit assignment was made).
+        if capture.lines or not job.get("logs"):
+            job["logs"] = capture.lines
+        # Reset the job-id context var only if the token was successfully created.
+        # If _current_job_id_var.set() itself had raised, job_id_token would be
+        # None and calling reset(None) would raise a TypeError.
+        if job_id_token is not None:
+            _current_job_id_var.reset(job_id_token)
 
 
 @app.route("/api/ping")
@@ -561,23 +754,8 @@ def start_project():
         return jsonify({"error": "project_name and project_description are required"}), 400
     if backend_choice not in ("excel", "csv", "sql", "odoo"):
         return jsonify({"error": f"data_backend must be one of: excel, csv, sql, odoo (got '{backend_choice}')"}), 400
-    # 1. Update config.yaml backend type
-    try:
-        config_path = BASE_DIR / "config.yaml"
-        with open(config_path, "r", encoding="utf-8") as f:
-            config_content = f.read()
-        updated = re.sub(
-            r'(data_backend:\s*\n\s*type:\s*)"[^"]+"',
-            rf'\g<1>"{backend_choice}"',
-            config_content,
-            count=1,
-        )
-        with open(config_path, "w", encoding="utf-8") as f:
-            f.write(updated)
-    except Exception:
-        pass
 
-    # 2. Start background job
+    # Start background job
     job_id = str(uuid.uuid4())
     print(f"DEBUG: Starting project '{project_name}' with job_id {job_id}")
     
@@ -595,7 +773,7 @@ def start_project():
     }
 
     thread = threading.Thread(
-        target=_run_pipeline, args=(job_id, project_name, project_description)
+        target=_run_pipeline, args=(job_id, project_name, project_description, backend_choice)
     )
     thread.daemon = True
     thread.start()
