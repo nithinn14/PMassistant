@@ -1,12 +1,53 @@
+import io
+import json
+import tempfile
 import unittest
+from contextlib import redirect_stdout
 from datetime import date, datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+from unittest.mock import patch, MagicMock
+
 import pandas as pd
 
-from tools.save_schedule_tool import add_working_days
+from data_backend.base import DataBackend
+from data_backend.registry import bind_backend, reset_bound_backend
+from tools.save_schedule_tool import add_working_days, save_schedule
 from tools.gantt_tool import _apply_dependency_scheduling, _work_days, _add_work_days
 
-import io
-from contextlib import redirect_stdout
+
+class _TestScheduleBackend(DataBackend):
+    def __init__(self, initial_data=None):
+        self.storage = {}
+        if initial_data:
+            for k, v in initial_data.items():
+                self.storage[k] = v.copy(deep=True) if isinstance(v, pd.DataFrame) else v
+
+    def read(self, table_name: str, filters: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
+        if table_name in self.storage:
+            df = self.storage[table_name].copy(deep=True)
+            if filters:
+                for col, val in filters.items():
+                    if col in df.columns:
+                        df = df[df[col] == val]
+            return df
+        raise FileNotFoundError(f"{table_name} not found")
+
+    def write(self, table_name: str, df: pd.DataFrame, mode: str = "replace") -> None:
+        if mode == "append" and table_name in self.storage:
+            self.storage[table_name] = pd.concat([self.storage[table_name], df], ignore_index=True)
+        else:
+            self.storage[table_name] = df.copy(deep=True)
+
+    def append(self, table_name: str, df: pd.DataFrame) -> None:
+        self.write(table_name, df, mode="append")
+
+    def exists(self, table_name: str) -> bool:
+        return table_name in self.storage
+
+    def update(self, table_name: str, df: pd.DataFrame, key_columns: List[str]) -> None:
+        self.storage[table_name] = df.copy(deep=True)
+
 
 class TestSchedulingRegressions(unittest.TestCase):
     """
@@ -425,6 +466,88 @@ class TestSchedulingRegressions(unittest.TestCase):
         self.assertIn("Warning:", output.getvalue())
         self.assertEqual(res.iloc[0]["start_date"].date(), self.monday)
         self.assertEqual(res.iloc[0]["end_date"].date(), self.monday)
+
+    # 17. Actual save_schedule() tool execution
+    def test_17_save_schedule_tool_execution(self):
+        """
+        save_schedule() tool accepts valid task JSON, reads employee information from backend,
+        performs scheduling, writes the scheduled dataset via backend, and assigns proper fields.
+        """
+        emp_df = pd.DataFrame([
+            {"Employee_Name": "Alice Developer", "Email": "alice@example.com", "Role": "Backend Developer"},
+            {"Employee_Name": "Bob Developer", "Email": "bob@example.com", "Role": "Frontend Developer"},
+            {"Employee_Name": "Carol Manager", "Email": "carol@example.com", "Role": "Project Manager"},
+        ])
+        backend = _TestScheduleBackend({"employees": emp_df})
+        token = bind_backend(backend)
+
+        pname = "SyntheticSaveScheduleProj"
+        payload = json.dumps({
+            "project_name": pname,
+            "tasks": [
+                {
+                    "task_id": "T1",
+                    "task_name": "API Architecture",
+                    "assigned_empl": "Alice Developer",
+                    "time_days": 2.0,
+                    "dependencies": [],
+                },
+                {
+                    "task_id": "T2",
+                    "task_name": "Frontend Views",
+                    "assigned_empl": "Bob Developer",
+                    "time_days": 3.0,
+                    "dependencies": ["T1"],
+                },
+            ],
+        })
+
+        try:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                tmp_path = Path(tmp_dir)
+
+                def _fake_path(arg):
+                    if "save_schedule_tool" in str(arg):
+                        return tmp_path / "tools" / "save_schedule_tool.py"
+                    return Path(arg)
+
+                mock_cfg = {"telegram": {"enabled": False}, "email": {"enabled": False}}
+                buf = io.StringIO()
+
+                with patch("tools.save_schedule_tool.Path", side_effect=_fake_path), \
+                     patch("tools.save_schedule_tool.load_config", return_value=mock_cfg), \
+                     patch("agents.communication.factory.build_email_notifier") as mock_notifier, \
+                     redirect_stdout(buf):
+
+                    mock_notifier.return_value = MagicMock()
+                    result_json_str = save_schedule(payload)
+
+                # Parse and verify tool return value
+                result = json.loads(result_json_str)
+                self.assertEqual(result["project_name"], pname)
+                self.assertEqual(len(result["tasks"]), 2)
+
+                # Verify dataset written through backend
+                self.assertTrue(backend.exists(f"{pname}_Scheduled"))
+                sched_df = backend.read(f"{pname}_Scheduled")
+                self.assertEqual(len(sched_df), 2)
+                self.assertEqual(list(sched_df["task_id"]), ["T1", "T2"])
+                self.assertEqual(list(sched_df["assigned_empl"]), ["Alice Developer", "Bob Developer"])
+                self.assertEqual(list(sched_df["assigned_email"]), ["alice@example.com", "bob@example.com"])
+                self.assertEqual(list(sched_df["project_manager"]), ["Carol Manager", "Carol Manager"])
+                self.assertEqual(list(sched_df["project_manager_email"]), ["carol@example.com", "carol@example.com"])
+                self.assertEqual(list(sched_df["RACI"]), ["R", "R"])
+
+                # Verify start and end dates are populated
+                self.assertTrue(all(pd.notnull(sched_df["start_date"])))
+                self.assertTrue(all(pd.notnull(sched_df["end_date"])))
+
+                # T2 depends on T1, so T2 start_date must be after T1 start_date
+                t1_start = pd.to_datetime(sched_df.iloc[0]["start_date"])
+                t2_start = pd.to_datetime(sched_df.iloc[1]["start_date"])
+                self.assertGreater(t2_start, t1_start)
+        finally:
+            reset_bound_backend(token)
 
 
 if __name__ == "__main__":
