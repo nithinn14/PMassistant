@@ -11,13 +11,15 @@ Key behaviours:
        • Assigned_Employee == "No Resource Available", OR
        • task_status == "waiting_resource"
   3. BALANCED selection — picks the employee with the LOWEST Allocated_Hours
-     among eligible candidates (those with Free_Hours > 0), not the highest.
+     among eligible candidates (those with Free_Hours >= hours_needed), not the highest.
   4. SHORTAGE marking — when no candidate is found, sets task_status to
      "waiting_resource" so the ValidationAgent can detect and report it.
+  5. DURATION validation — tasks with missing, zero, negative, or non-finite durations
+     are marked "waiting_resource" without allocating an employee.
 """
 
-from typing import List, Dict, Any
-
+from typing import List, Dict, Any, Optional
+import math
 import pandas as pd
 from google.adk.tools.function_tool import FunctionTool
 
@@ -36,6 +38,23 @@ def _is_unassigned(row: pd.Series) -> bool:
 
     unassigned_values = {"", "nan", "none", "no resource available"}
     return emp.lower() in unassigned_values or status == "waiting_resource"
+
+
+def _validate_duration(val: Any) -> Optional[float]:
+    """
+    Validate task duration in days.
+    Returns positive float if valid and finite, else None.
+    Invalid, missing, zero, negative, or non-finite durations return None.
+    """
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return None
+    try:
+        f = float(val)
+        if math.isfinite(f) and f > 0:
+            return f
+        return None
+    except (ValueError, TypeError):
+        return None
 
 
 def _load_existing_assignments(backend, project_name: str) -> pd.DataFrame:
@@ -57,6 +76,7 @@ def _merge_tasks(existing_df: pd.DataFrame, incoming_tasks: List[Dict]) -> pd.Da
     • If a task_id already exists in the saved file AND is assigned → keep the
       saved row (preserves previous assignments).
     • Otherwise use the incoming row (new task or waiting_resource task).
+    • Preserve any existing assigned tasks not present in incoming_tasks.
     """
     incoming_df = pd.DataFrame(incoming_tasks)
 
@@ -70,9 +90,10 @@ def _merge_tasks(existing_df: pd.DataFrame, incoming_tasks: List[Dict]) -> pd.Da
     existing_indexed = existing_df.set_index("task_id", drop=False)
 
     merged_rows = []
+    seen_tids = set()
     for _, row in incoming_df.iterrows():
         tid = row.get("task_id")
-        if tid in existing_indexed.index:
+        if pd.notna(tid) and str(tid).strip() and tid in existing_indexed.index:
             existing_row = existing_indexed.loc[tid]
             if isinstance(existing_row, pd.DataFrame):
                 existing_row = existing_row.iloc[0]
@@ -81,9 +102,21 @@ def _merge_tasks(existing_df: pd.DataFrame, incoming_tasks: List[Dict]) -> pd.Da
                 row_dict = existing_row.to_dict()
                 row_dict["task_id"] = tid  # restore / ensure task_id is present
                 merged_rows.append(row_dict)
+                seen_tids.add(tid)
                 continue
         # Otherwise use the incoming (unassigned) row
         merged_rows.append(row.to_dict())
+        if pd.notna(tid) and str(tid).strip():
+            seen_tids.add(tid)
+
+    # Preserve any assigned tasks from existing_df not present in incoming_tasks
+    for tid, ex_row in existing_indexed.iterrows():
+        if pd.notna(tid) and str(tid).strip() and tid not in seen_tids:
+            if not _is_unassigned(ex_row):
+                row_dict = ex_row.to_dict()
+                row_dict["task_id"] = tid
+                merged_rows.append(row_dict)
+                seen_tids.add(tid)
 
     return pd.DataFrame(merged_rows)
 
@@ -112,12 +145,6 @@ def assign_resources(project_name: str, tasks: List[Dict[str, Any]]) -> Dict[str
 
     if "assigned_role" not in incoming_df.columns:
         return {"error": "Missing assigned_role column"}
-
-    if "time_days" not in incoming_df.columns:
-        incoming_df["time_days"] = 0
-    incoming_df["time_days"] = pd.to_numeric(
-        incoming_df["time_days"], errors="coerce"
-    ).fillna(0)
 
     # ── 2. Load and merge with existing assignments ─────────────────────────
     backend = get_backend()
@@ -160,24 +187,38 @@ def assign_resources(project_name: str, tasks: List[Dict[str, Any]]) -> Dict[str
         if not _is_unassigned(row):
             continue
 
+        raw_time = row.get("time_days") if "time_days" in tasks_df.columns else None
+        valid_days = _validate_duration(raw_time)
+
+        # Do not allow invalid, missing, zero, negative, or non-finite task durations
+        # to silently become zero-hour assignments. Handle them explicitly without allocating an employee.
+        if valid_days is None:
+            tasks_df.at[i, "Assigned_Employee"] = "No Resource Available"
+            tasks_df.at[i, "task_status"] = "waiting_resource"
+            continue
+
+        # 1. Calculate hours_needed = time_days * 8 before filtering eligible employees.
+        hours_needed = valid_days * 8.0
+
+        # Preserve valid numeric float/int duration in tasks_df (preserving fractional days)
+        tasks_df.at[i, "time_days"] = valid_days
+
         # Resolve role abbreviation → canonical name
-        raw_role = str(row["assigned_role"]).strip()
+        raw_role = str(row.get("assigned_role", "")).strip()
         first_role = raw_role.split(",")[0].strip()
         target_role = ROLE_MAP.get(first_role, first_role)
 
-        # Find eligible candidates — role match AND has free capacity
+        # 2. Find eligible candidates — role match AND Free_Hours >= hours_needed
         candidates = employees_df[
             (employees_df["Role"].astype(str).str.strip().str.lower() == target_role.strip().lower())
-            & (employees_df["Free_Hours"] > 0)
+            & (employees_df["Free_Hours"] >= hours_needed)
         ]
 
         if not candidates.empty:
-            # BALANCED SELECTION: pick the employee with the LOWEST
+            # 3. BALANCED SELECTION: pick the employee with the LOWEST
             # Allocated_Hours to distribute work evenly across the team
             emp_index = candidates["Allocated_Hours"].idxmin()
             emp_name = employees_df.loc[emp_index, "Employee_Name"]
-
-            hours_needed = tasks_df.at[i, "time_days"] * 8
 
             tasks_df.at[i, "Assigned_Employee"] = emp_name
             tasks_df.at[i, "task_status"] = "assigned"
@@ -185,7 +226,7 @@ def assign_resources(project_name: str, tasks: List[Dict[str, Any]]) -> Dict[str
             # ── Update the employee's running totals ──────────
             employees_df.at[emp_index, "Allocated_Hours"] += hours_needed
             employees_df.at[emp_index, "Free_Hours"] -= hours_needed
-            
+
             # CUMULATIVE: Append project name if not already present
             old_projects = str(employees_df.at[emp_index, "Current_Project"]).strip()
             if old_projects and old_projects.lower() != "nan":
@@ -195,7 +236,6 @@ def assign_resources(project_name: str, tasks: List[Dict[str, Any]]) -> Dict[str
                     employees_df.at[emp_index, "Current_Project"] = ", ".join(plist)
             else:
                 employees_df.at[emp_index, "Current_Project"] = project_name
-
 
         else:
             # No capacity available — mark for PM attention
@@ -210,9 +250,6 @@ def assign_resources(project_name: str, tasks: List[Dict[str, Any]]) -> Dict[str
     backend.write(f"{project_name}_Assigned", tasks_df)
     backend.write("employees", employees_df)
     print("Resource assignment complete")
-
-    # Note: employees_df rename for downstream is already handled above line 198
-    # but that employees_df variable is separate from tasks_df.
 
     resource_blocked = any(
         str(row.get("task_status", "")).strip() == "waiting_resource"
