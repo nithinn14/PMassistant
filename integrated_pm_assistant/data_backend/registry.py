@@ -11,11 +11,10 @@ from __future__ import annotations
 
 import contextvars
 import threading
-from pathlib import Path
+
 from typing import Any, Dict, Optional
 
-import yaml
-
+from config_loader import load_config 
 from data_backend.base import DataBackend
 
 
@@ -54,8 +53,7 @@ class BackendFactory:
     # ── Private / Instance creation ──────────────────────────────────────────
 
     def _load_config(self) -> Dict[str, Any]:
-        with open(Path("config.yaml"), "r") as f:
-            return yaml.safe_load(f)["data_backend"]
+        return load_config()["data_backend"]
 
     def create_backend(self, config: Dict[str, Any]) -> DataBackend:
         """Create a new DataBackend instance without caching it in the singleton."""
@@ -139,4 +137,3 @@ def get_backend(config: Optional[Dict[str, Any]] = None) -> DataBackend:
 def reset_backend() -> None:
     """Reset the backend singleton (e.g. when switching config)."""
     _factory.reset()
-
