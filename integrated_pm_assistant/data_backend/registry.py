@@ -16,7 +16,7 @@ from typing import Any, Dict, Optional
 
 from config_loader import load_config 
 from data_backend.base import DataBackend
-
+from paths import APP_ROOT
 
 # Context variable for thread-local / task-local backend binding
 _current_backend_var: contextvars.ContextVar[Optional[DataBackend]] = contextvars.ContextVar(
@@ -104,7 +104,10 @@ class BackendFactory:
 
     def _create_csv(self, config: Dict) -> DataBackend:
         from data_backend.csv_backend import CSVBackend
-        return CSVBackend(directory=config["csv"]["directory"])
+        return CSVBackend(
+            directory=config["csv"]["directory"],
+            root_dir=APP_ROOT
+        )
 
 
 # Module-level singleton factory instance

@@ -14,16 +14,16 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 
 from data_backend.base import DataBackend
-
+from paths import resolve_path
 
 class ExcelBackend(DataBackend):
     """Read/write data as ``.xlsx`` files via ``openpyxl``."""
 
     def __init__(self, output_dir: str = "output", root_dir: str = ".", file_map: Optional[Dict[str, str]] = None):
-        self._output_dir = Path(root_dir) / output_dir
-        self._root_dir = Path(root_dir)
-        self._output_dir.mkdir(parents=True, exist_ok=True)
+        self._root_dir = resolve_path(root_dir)
+        self._output_dir = resolve_path(output_dir, base=self._root_dir)
         self._file_map = file_map or {}
+        self._output_dir.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -38,7 +38,7 @@ class ExcelBackend(DataBackend):
         3) Fallback: output directory.
         """
         if table_name in self._file_map:
-            return self._root_dir / self._file_map[table_name]
+            return resolve_path(self._file_map[table_name], base=self._root_dir)
 
         root_tables = {"employees"}
 

@@ -62,8 +62,14 @@ class BaseBackendTestCase(unittest.TestCase):
 
         self.tmp_dir = tempfile.TemporaryDirectory()
         self.test_dir = Path(self.tmp_dir.name)
-        self.excel_backend = ExcelBackend(output_dir="output", root_dir=str(self.test_dir))
-        self.csv_backend = CSVBackend(directory=str(self.test_dir / "output"))
+        self.excel_backend = ExcelBackend(
+            output_dir="output",
+            root_dir=str(self.test_dir)
+        )
+        self.csv_backend = CSVBackend(
+            directory=str(self.test_dir / "output"),
+            root_dir=str(self.test_dir)
+        )
 
     def tearDown(self):
         self._redirect.__exit__(None, None, None)
@@ -510,19 +516,22 @@ class TestExcelCsvConsistency(BaseBackendTestCase):
         self.assertEqual(list(excel_res["Days"]), list(csv_res["Days"]))
 
     def test_employee_file_path_resolution_consistency(self):
-        """
-        Test employee-file path resolution without accessing real employee data.
-        Confirms the known architectural inconsistency where ExcelBackend resolves
-        'employees' under root_dir while CSVBackend resolves it relative to CWD.
-        """
-        # ExcelBackend resolves under root_dir
-        excel_path = self.excel_backend._resolve_path("employees")
-        self.assertEqual(excel_path, self.test_dir / "employees.xlsx")
+        """Both backends resolve employee files under root_dir."""
 
-        # CSVBackend resolves to Path("employees.csv") without honoring directory or root_dir
+        excel_path = self.excel_backend._resolve_path("employees")
         csv_path = self.csv_backend._path("employees")
-        self.assertEqual(csv_path, Path("employees.csv"))
-        self.assertFalse(csv_path.is_absolute())
+
+        self.assertEqual(excel_path, self.test_dir / "employees.xlsx")
+        self.assertEqual(csv_path, self.test_dir / "employees.csv")
+
+    def test_excel_file_map_resolves_relative_path_under_root(self):
+        backend = ExcelBackend(
+            root_dir=str(self.test_dir),
+            file_map={"employees": "storage/employees.xlsx"}
+        )
+
+        expected_path = self.test_dir / "storage" / "employees.xlsx"
+        self.assertEqual(backend._resolve_path("employees"), expected_path)
 
     def test_blank_email_handling_consistency(self):
         """

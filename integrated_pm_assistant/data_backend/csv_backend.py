@@ -13,19 +13,20 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 
 from data_backend.base import DataBackend
-
+from paths import resolve_path
 
 class CSVBackend(DataBackend):
     """Read/write data as ``.csv`` files."""
 
-    def __init__(self, directory: str = "output"):
-        self._dir = Path(directory)
+    def __init__(self, directory: str = "output", root_dir: str = "."):
+        self._root_dir = resolve_path(root_dir)
+        self._dir = resolve_path(directory, base=self._root_dir)
         self._dir.mkdir(parents=True, exist_ok=True)
 
     def _path(self, table_name: str) -> Path:
         root_tables = {"employees"}
         if table_name.lower() in root_tables:
-            return Path(f"{table_name}.csv")
+            return self._root_dir / f"{table_name}.csv"
         return self._dir / f"{table_name}.csv"
 
     # ------------------------------------------------------------------
