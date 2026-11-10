@@ -7,7 +7,7 @@ manages workflow state for shortage detection and resolution.
 
 import json
 import yaml
-from pathlib import Path
+from paths import DEFAULT_OUTPUT_DIR
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 
@@ -53,8 +53,8 @@ def save_diagnostic_report(project_name: str, validation_result: Dict[str, Any])
     Writes resource_diagnostic.json to the output directory.
     Returns the file path.
     """
-    output_dir = Path("output")
-    output_dir.mkdir(exist_ok=True)
+    output_dir = DEFAULT_OUTPUT_DIR
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     report = {
         "project": project_name,
@@ -80,8 +80,8 @@ def record_notification_issues(project_name: str, issues: List[Dict[str, Any]]) 
     and synchronizes with output/<project_name>_resource_diagnostic.json if present.
     Returns the file path.
     """
-    output_dir = Path("output")
-    output_dir.mkdir(exist_ok=True)
+    output_dir = DEFAULT_OUTPUT_DIR
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     data = {
         "project": project_name,
@@ -122,8 +122,8 @@ def update_workflow_state(
     Writes/updates workflow_state.yaml in the output directory.
     Returns the file path.
     """
-    output_dir = Path("output")
-    output_dir.mkdir(exist_ok=True)
+    output_dir = DEFAULT_OUTPUT_DIR
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     state = {
         "project": project_name,
@@ -149,7 +149,7 @@ def check_workflow_resolution(project_name: str) -> Dict[str, Any]:
     Reads workflow_state.yaml and returns the current state.
     Returns dict with 'resolution', 'status', etc.
     """
-    file_path = Path("output") / f"{project_name}_workflow_state.yaml"
+    file_path = DEFAULT_OUTPUT_DIR / f"{project_name}_workflow_state.yaml"
 
     if not file_path.exists():
         return {"resolution": "NO_STATE_FILE", "status": "UNKNOWN"}

@@ -3,7 +3,7 @@ import plotly.express as px
 import json
 import re
 import math
-from pathlib import Path
+from paths import DEFAULT_OUTPUT_DIR
 from google.adk.tools.function_tool import FunctionTool
 
 import ast
@@ -200,8 +200,8 @@ def generate_gantt_chart(input_json: str) -> str:
 
         fig.update_yaxes(autorange="reversed") 
         
-        output_dir = Path("output")
-        output_dir.mkdir(exist_ok=True)
+        output_dir = DEFAULT_OUTPUT_DIR
+        output_dir.mkdir(parents=True, exist_ok=True)
         
         html_path = output_dir / f"{project_name}_Gantt.html"
         fig.write_html(str(html_path))
