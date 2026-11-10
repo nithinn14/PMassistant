@@ -15,7 +15,6 @@ SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 OUTPUT_DIR = BASE_DIR / "output"
-OUTPUT_DIR.mkdir(exist_ok=True)
 
 CREDENTIALS_PATH = BASE_DIR / "credentials.json"
 TOKEN_PATH = BASE_DIR / "token.json"
@@ -134,6 +133,8 @@ def notify_project_level_meetings(task_excel_path: str, project_name: str, meeti
         if not existing.empty:
             print(f"ℹ️ {meeting_type} meeting already exists for {project_name}. Skipping creation/notifications.")
             return {"status": "already_exists", "event_id": existing.iloc[-1]["Event_ID"]}
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     meeting = create_calendar_event(
         summary=f"{project_name} - {meeting_type}",

@@ -35,6 +35,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from paths import APP_ROOT, resolve_path
 
 import requests
 
@@ -64,9 +65,11 @@ def _load_telegram_config() -> tuple[str, str]:
 
 def _output_dir() -> Path:
     config = load_config()
-    root = config.get("data_backend", {}).get("excel", {}).get("root_dir", ".")
-    out = config.get("data_backend", {}).get("excel", {}).get("output_dir", "output")
-    path = Path(root) / out
+    excel_cfg = config.get("data_backend", {}).get("excel", {})
+
+    root = resolve_path(excel_cfg.get("root_dir", APP_ROOT), APP_ROOT)
+    path = resolve_path(excel_cfg.get("output_dir", "output"), root)
+
     path.mkdir(parents=True, exist_ok=True)
     return path
 

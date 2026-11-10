@@ -15,6 +15,9 @@ if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 import pandas as pd
+import telegram_bot
+import sync_meetings
+from tools import real_meet
 
 from data_backend.registry import bind_backend, reset_bound_backend
 from tools.real_meet import notify_project_level_meetings
@@ -253,8 +256,8 @@ class TestRealMeetPaths(BasePathTestCase):
             self.assertEqual(isolated_rm.CREDENTIALS_PATH, app_path / "credentials.json")
             self.assertEqual(isolated_rm.TOKEN_PATH, app_path / "token.json")
 
-            # Line 18 (OUTPUT_DIR.mkdir) created the directory in app_path, not in real app or work_path
-            self.assertTrue(expected_output_dir.exists())
+            # Importing the module should not create the output directory.
+            self.assertFalse(expected_output_dir.exists())
             self.assertFalse((work_path / "output").exists())
 
             # Verify none of the paths reside within or relative to the changed CWD
@@ -370,6 +373,164 @@ class TestRealMeetPaths(BasePathTestCase):
             app_temp.cleanup()
             work_temp.cleanup()
 
+    def test_import_does_not_create_output_directory(self):
+        app_temp = tempfile.TemporaryDirectory()
+        work_temp = tempfile.TemporaryDirectory()
+        orig_cwd = os.getcwd()
+
+        try:
+            app_path = Path(app_temp.name)
+            work_path = Path(work_temp.name)
+            fake_module_path = app_path / "tools" / "real_meet.py"
+            fake_module_path.parent.mkdir(parents=True)
+            output_path = app_path / "output"
+
+            source = Path(real_meet.__file__).read_text(encoding="utf-8")
+            fake_module_path.write_text(source, encoding="utf-8")
+
+            os.chdir(work_path)
+
+            spec = importlib.util.spec_from_file_location(
+                "isolated_real_meet_no_output",
+                fake_module_path,
+            )
+            module = importlib.util.module_from_spec(spec)
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                spec.loader.exec_module(module)
+
+            self.assertFalse(output_path.exists())
+
+        finally:
+            os.chdir(orig_cwd)
+            app_temp.cleanup()
+            work_temp.cleanup()
+
+class TestTelegramBotPaths(BasePathTestCase):
+    """Regression tests for Telegram bot output path resolution."""
+
+    def test_output_dir_is_independent_of_cwd(self):
+        app_temp = tempfile.TemporaryDirectory()
+        work_temp = tempfile.TemporaryDirectory()
+        orig_cwd = os.getcwd()
+
+        try:
+            app_path = Path(app_temp.name)
+            work_path = Path(work_temp.name)
+
+            os.chdir(work_path)
+
+            config = {
+                "data_backend": {
+                    "excel": {
+                        "root_dir": ".",
+                        "output_dir": "output",
+                    }
+                }
+            }
+
+            with patch("telegram_bot.APP_ROOT", app_path), \
+                 patch("telegram_bot.load_config", return_value=config):
+                result = telegram_bot._output_dir()
+
+            self.assertEqual(result, app_path / "output")
+            self.assertTrue(result.is_dir())
+            self.assertFalse((work_path / "output").exists())
+
+        finally:
+            os.chdir(orig_cwd)
+            app_temp.cleanup()
+            work_temp.cleanup()
+
+    def test_output_dir_respects_configured_relative_root(self):
+        app_temp = tempfile.TemporaryDirectory()
+        work_temp = tempfile.TemporaryDirectory()
+        orig_cwd = os.getcwd()
+
+        try:
+            app_path = Path(app_temp.name)
+            work_path = Path(work_temp.name)
+
+            config = {
+                "data_backend": {
+                    "excel": {
+                        "root_dir": "storage",
+                        "output_dir": "generated",
+                    }
+                }
+            }
+
+            os.chdir(work_path)
+
+            with patch("telegram_bot.APP_ROOT", app_path), \
+                 patch("telegram_bot.load_config", return_value=config):
+                result = telegram_bot._output_dir()
+
+            self.assertEqual(result, app_path / "storage" / "generated")
+            self.assertTrue(result.is_dir())
+            self.assertFalse((work_path / "storage").exists())
+
+        finally:
+            os.chdir(orig_cwd)
+            app_temp.cleanup()
+            work_temp.cleanup()
+
+
+
+class TestSyncMeetingsPaths(BasePathTestCase):
+    """Regression tests for meeting sync output paths."""
+
+    def test_meeting_files_are_found_independent_of_cwd(self):
+        app_temp = tempfile.TemporaryDirectory()
+        work_temp = tempfile.TemporaryDirectory()
+        orig_cwd = os.getcwd()
+
+        try:
+            app_path = Path(app_temp.name)
+            work_path = Path(work_temp.name)
+            output_path = app_path / "output"
+            output_path.mkdir()
+
+            # Create a meeting file in the application output directory.
+            (output_path / "TestProject_Meetings.xlsx").touch()
+
+            os.chdir(work_path)
+
+            with (
+                patch("sync_meetings.DEFAULT_OUTPUT_DIR", output_path),
+                patch("sync_meetings.load_dotenv"),
+                patch("builtins.input", return_value="TestProject"),
+                patch(
+                    "sync_meetings.check_rsvp",
+                    return_value=json.dumps({
+                        "counts": {
+                            "accepted": 1,
+                            "declined": 0,
+                            "awaiting": 0,
+                        }
+                    }),
+                ),
+                patch(
+                    "sync_meetings.reschedule_meeting",
+                    return_value=json.dumps({"status": "unchanged"}),
+                ),
+                patch("sync_meetings.send_reminder") as mock_reminder,
+            ):
+                captured = io.StringIO()
+                with contextlib.redirect_stdout(captured):
+                    sync_meetings.main()
+
+            output = captured.getvalue()
+
+            self.assertIn("TestProject", output)
+            self.assertIn(str(output_path / "TestProject_Meetings.xlsx"), output)
+            self.assertFalse((work_path / "output").exists())
+            mock_reminder.assert_not_called()
+
+        finally:
+            os.chdir(orig_cwd)
+            app_temp.cleanup()
+            work_temp.cleanup()
 
 if __name__ == "__main__":
     unittest.main()

@@ -9,19 +9,15 @@ Checks RSVP status, sends reminders, and reschedules if proposals exist.
 
 import json
 import sys
-import os
-from glob import glob
+
 from dotenv import load_dotenv
+from paths import DEFAULT_OUTPUT_DIR
 
 # Fix Windows encoding for emojis
 sys.stdout.reconfigure(encoding='utf-8')  # type: ignore
 sys.stderr.reconfigure(encoding='utf-8')  # type: ignore
 
-# Add current directory to path
-sys.path.append(os.getcwd())
-
 from tools.meeting_tools import check_rsvp, send_reminder, reschedule_meeting
-
 
 MEETING_TYPES = ["Kickoff", "Mid-Project Review", "Final Review"]
 
@@ -32,15 +28,16 @@ def main():
     print("\n--- Project Meeting Sync Utility ---")
 
     # List existing project meeting files
-    output_dir = "output"
     print("\nFound existing project meeting files:")
-    meeting_files = glob(os.path.join(output_dir, "*_Meetings.xlsx"))
+    meeting_files = DEFAULT_OUTPUT_DIR.glob("*_Meetings.xlsx")
+
+    meeting_files = list(meeting_files)
 
     if not meeting_files:
         print(" - No project-specific meeting files found.")
     else:
         for f in meeting_files:
-            p_name = os.path.basename(f).replace("_Meetings.xlsx", "")
+            p_name = f.name.replace("_Meetings.xlsx", "")
             print(f" - {p_name}")
 
     project_name = input("\nEnter project name to sync: ").strip()
@@ -87,8 +84,7 @@ def main():
     for res in results:
         print(f" - {res}")
 
-    print(f"\nCheck 'output/{project_name}_Meetings.xlsx' for the latest status.")
-
+    print(f"\nCheck '{DEFAULT_OUTPUT_DIR / f'{project_name}_Meetings.xlsx'}' for the latest status.")
 
 if __name__ == "__main__":
     main()
