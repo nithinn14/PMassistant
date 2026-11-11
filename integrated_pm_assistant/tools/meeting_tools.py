@@ -18,6 +18,8 @@ import json
 import os
 from pathlib import Path
 
+from paths import APP_ROOT, TOKEN_FILE, resolve_path
+
 from google.adk.tools.function_tool import FunctionTool
 
 from config_loader import load_config
@@ -29,28 +31,17 @@ from config_loader import load_config
 
 def _output_dir() -> Path:
     config = load_config()
-    base = Path(__file__).resolve().parent.parent
-    out = config["data_backend"]["excel"]["output_dir"]
-    path = base / out
+    excel_cfg = config.get("data_backend", {}).get("excel", {})
+
+    root = resolve_path(excel_cfg.get("root_dir", APP_ROOT), APP_ROOT)
+    path = resolve_path(excel_cfg.get("output_dir", "output"), root)
+
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
 def _token_path() -> Path:
-    return Path(__file__).resolve().parent.parent / "token.json"
-
-
-def _build_email_notifier():
-    config = load_config()
-    smtp = config["smtp"]
-    from agents.communication.notifiers.email_notifier import EmailNotifier
-    return EmailNotifier(
-        sender_email=os.environ[smtp["email_env"]],
-        sender_password=os.environ[smtp["password_env"]],
-        smtp_host=smtp["host"],
-        smtp_port=smtp["port"],
-    )
-
+    return TOKEN_FILE
 
 # ---------------------------------------------------------------------------
 # Tool 1: Create Meeting

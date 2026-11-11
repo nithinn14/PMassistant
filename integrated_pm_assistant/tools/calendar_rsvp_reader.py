@@ -1,6 +1,8 @@
-from pathlib import Path
+from paths import TOKEN_FILE
+
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
+
 from typing import Optional, Dict, Any
 
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
@@ -8,14 +10,11 @@ SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
 def get_event_attendee_status(event_id: str) -> Optional[Dict[str, Any]]:
 
-    BASE_DIR = Path(__file__).resolve().parents[1]
-    TOKEN_PATH = BASE_DIR / "token.json"
-
-    if not TOKEN_PATH.exists():
+    if not TOKEN_FILE.exists():
         print("❌ token.json not found.")
         return None
 
-    creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), SCOPES)
+    creds = Credentials.from_authorized_user_file(str(TOKEN_FILE), SCOPES)
     service = build("calendar", "v3", credentials=creds)
 
     event = service.events().get(

@@ -5,13 +5,14 @@ import email
 from email.message import Message
 from email.utils import parseaddr
 from typing import Optional, Tuple, Dict
-from pathlib import Path
+
+from paths import ENV_PATH
+
 from dotenv import load_dotenv
 import os
 
 
-BASE_DIR = Path(__file__).resolve().parents[1]
-load_dotenv(BASE_DIR / ".env")
+load_dotenv(ENV_PATH)
 
 EMAIL_ADDRESS = os.getenv("SENDER_EMAIL")
 EMAIL_PASSWORD = os.getenv("SENDER_PASSWORD")

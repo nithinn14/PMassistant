@@ -17,7 +17,8 @@ Object graph built here:
 """
 
 import os
-from pathlib import Path
+
+from paths import APP_ROOT, TOKEN_FILE, resolve_path
 
 from config_loader import load_config
 from agents.communication.notifiers.email_notifier import EmailNotifier
@@ -89,9 +90,12 @@ try:
     from agents.communication.services.meeting_rescheduler import MeetingRescheduler
 
     def build_meeting_lifecycle_agent(config: dict, notification_agent: NotificationAgent):
-        base_dir = Path(__file__).resolve().parents[2]  # → integrated_pm_assistant/
-        output_dir = base_dir / config["data_backend"]["excel"]["output_dir"]
-        token_path = base_dir / "token.json"
+
+        excel_cfg = config.get("data_backend", {}).get("excel", {})
+
+        root = resolve_path(excel_cfg.get("root_dir", APP_ROOT), APP_ROOT)
+        output_dir = resolve_path(excel_cfg.get("output_dir", "output"), root)
+        token_path = TOKEN_FILE
 
         try:
             from agents.communication.meeting_lifecycle_agent import MeetingLifecycleAgent

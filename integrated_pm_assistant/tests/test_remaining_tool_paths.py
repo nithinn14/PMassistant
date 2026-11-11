@@ -15,9 +15,13 @@ if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 import pandas as pd
+
 import telegram_bot
 import sync_meetings
 from tools import real_meet
+from tools import meeting_tools
+from tools import calendar_rsvp_reader
+from tools import gmail_proposal_reader
 
 from data_backend.registry import bind_backend, reset_bound_backend
 from tools.real_meet import notify_project_level_meetings
@@ -531,6 +535,85 @@ class TestSyncMeetingsPaths(BasePathTestCase):
             os.chdir(orig_cwd)
             app_temp.cleanup()
             work_temp.cleanup()
+
+
+class TestMeetingToolsPaths(BasePathTestCase):
+    def test_output_dir_respects_configured_root_independent_of_cwd(self):
+        app_temp = tempfile.TemporaryDirectory()
+        work_temp = tempfile.TemporaryDirectory()
+        orig_cwd = os.getcwd()
+
+        try:
+            app_path = Path(app_temp.name)
+            work_path = Path(work_temp.name)
+
+            config = {
+                "data_backend": {
+                    "excel": {
+                        "root_dir": "storage",
+                        "output_dir": "generated",
+                    }
+                }
+            }
+
+            os.chdir(work_path)
+
+            with (
+                patch("tools.meeting_tools.APP_ROOT", app_path),
+                patch("tools.meeting_tools.load_config", return_value=config),
+            ):
+                result = meeting_tools._output_dir()
+
+            expected = app_path / "storage" / "generated"
+            self.assertEqual(result, expected)
+            self.assertTrue(expected.is_dir())
+            self.assertFalse((work_path / "storage").exists())
+
+        finally:
+            os.chdir(orig_cwd)
+            app_temp.cleanup()
+            work_temp.cleanup()
+
+    def test_token_path_uses_central_token_file(self):
+        expected = Path("temporary_app") / "token.json"
+
+        with patch("tools.meeting_tools.TOKEN_FILE", expected):
+            self.assertEqual(meeting_tools._token_path(), expected)
+
+
+class TestCalendarRsvpReaderPaths(BasePathTestCase):
+    def test_token_path_uses_central_token_file(self):
+        expected = Path("temporary_app") / "token.json"
+
+        with patch("tools.calendar_rsvp_reader.TOKEN_FILE", expected):
+            self.assertEqual(calendar_rsvp_reader.TOKEN_FILE, expected)
+
+    def test_missing_token_returns_none_without_authentication(self):
+        missing_token = Path("temporary_app") / "missing_token.json"
+
+        with (
+            patch("tools.calendar_rsvp_reader.TOKEN_FILE", missing_token),
+            patch("tools.calendar_rsvp_reader.Credentials.from_authorized_user_file") as mock_credentials,
+        ):
+            result = calendar_rsvp_reader.get_event_attendee_status("test_event")
+
+        self.assertIsNone(result)
+        mock_credentials.assert_not_called()
+
+
+class TestGmailProposalReaderPaths(BasePathTestCase):
+    def test_module_loads_env_from_central_path(self):
+        with patch("dotenv.load_dotenv") as mock_load_dotenv:
+            importlib.reload(gmail_proposal_reader)
+
+            mock_load_dotenv.assert_called_once_with(
+                gmail_proposal_reader.ENV_PATH
+            )
+
+        # Restore the module's normal load_dotenv reference.
+        importlib.reload(gmail_proposal_reader)
+
+
 
 if __name__ == "__main__":
     unittest.main()
