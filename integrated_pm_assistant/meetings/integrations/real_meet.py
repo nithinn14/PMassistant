@@ -13,7 +13,7 @@ from googleapiclient.discovery import build
 
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
-BASE_DIR = Path(__file__).resolve().parents[1]
+BASE_DIR = Path(__file__).resolve().parents[2]
 OUTPUT_DIR = BASE_DIR / "output"
 
 CREDENTIALS_PATH = BASE_DIR / "credentials.json"
@@ -36,10 +36,10 @@ def create_calendar_event(summary, description, start_time, end_time, attendees)
                 print("DEBUG: Token refreshed successfully.")
             except Exception as e:
                 print(f"❌ Failed to refresh Google Token: {e}")
-                raise ValueError("Google Token expired and refresh failed. Please run 'python start_registration_listener.py' to re-authenticate.")
+                raise ValueError("Google Token expired and refresh failed. Please run 'python scripts/start_registration_listener.py' to re-authenticate.")
         else:
             print("DEBUG: No refresh token or creds missing.")
-            raise ValueError("Google Calendar Token missing or invalid. Please run 'python start_registration_listener.py' to authenticate.")
+            raise ValueError("Google Calendar Token missing or invalid. Please run 'python scripts/start_registration_listener.py' to authenticate.")
         
         with open(TOKEN_PATH, "w") as token:
             token.write(creds.to_json())
@@ -182,7 +182,7 @@ def notify_project_level_meetings(task_excel_path: str, project_name: str, meeti
     # ── Meeting email with join link (in addition to the Google Calendar invite) ──
     try:
         from config_loader import load_config
-        from agents.communication.factory import build_email_notifier
+        from communication.factory import build_email_notifier
 
         mailer = build_email_notifier(load_config())
         meet_link = meeting.get("meet_link")
@@ -222,7 +222,7 @@ def notify_project_level_meetings(task_excel_path: str, project_name: str, meeti
     # ── Telegram notifications ──────────────────────────────────────────────
     try:
         from config_loader import load_config
-        from agents.communication.notifiers.telegram_notifier import TelegramNotifier
+        from communication.telegram.telegram_notifier import TelegramNotifier
 
         config = load_config()
         tg_cfg = config.get("telegram", {})

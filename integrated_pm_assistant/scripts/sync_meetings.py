@@ -9,6 +9,11 @@ Checks RSVP status, sends reminders, and reschedules if proposals exist.
 
 import json
 import sys
+from pathlib import Path
+
+_APP_ROOT = Path(__file__).resolve().parents[1]
+if str(_APP_ROOT) not in sys.path:
+    sys.path.insert(0, str(_APP_ROOT))
 
 from dotenv import load_dotenv
 from paths import DEFAULT_OUTPUT_DIR
@@ -17,7 +22,7 @@ from paths import DEFAULT_OUTPUT_DIR
 sys.stdout.reconfigure(encoding='utf-8')  # type: ignore
 sys.stderr.reconfigure(encoding='utf-8')  # type: ignore
 
-from tools.meeting_tools import check_rsvp, send_reminder, reschedule_meeting
+from meetings.tools.meeting_tools import check_rsvp, send_reminder, reschedule_meeting
 
 MEETING_TYPES = ["Kickoff", "Mid-Project Review", "Final Review"]
 

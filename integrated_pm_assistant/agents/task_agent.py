@@ -1,7 +1,7 @@
 from google.adk.agents import LlmAgent
 from google.genai import types
 from config_loader import load_config
-from tools.save_tasks_tool import save_tasks_tool
+from tools.tasks.save_tasks_tool import save_tasks_tool
 from data_backend import get_backend
 
 def _available_roles():

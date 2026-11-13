@@ -4,11 +4,11 @@ import re
 import math
 import yaml
 import pandas as pd
-from pathlib import Path
 from datetime import datetime, timedelta
 from google.adk.tools.function_tool import FunctionTool
 from data_backend import get_backend
 from config_loader import load_config
+from paths import DEFAULT_OUTPUT_DIR
 
 
 def _parse_json(raw_input):
@@ -99,7 +99,7 @@ def save_schedule(input_json: str) -> str:
     # Replace the one-after-another queue with a dependency-based plan, using the
     # same logic as the Gantt chart, so every page and email shows the same dates.
     try:
-        from tools.gantt_tool import _apply_dependency_scheduling
+        from tools.scheduling.gantt_tool import _apply_dependency_scheduling
         planned = _apply_dependency_scheduling(df, project_start)
         df["start_date"] = planned["start_date"].dt.date
         df["end_date"] = planned["end_date"].dt.date
@@ -128,7 +128,7 @@ def save_schedule(input_json: str) -> str:
     )
     # ── Telegram task-assignment DMs ────────────────────────────────────────
     try:
-        from agents.communication.notifiers.telegram_notifier import TelegramNotifier
+        from communication.telegram.telegram_notifier import TelegramNotifier
 
         tg_cfg = config.get("telegram", {})
         if tg_cfg.get("enabled", False):
@@ -177,7 +177,7 @@ def save_schedule(input_json: str) -> str:
 
     # ── Email task-assignment notifications ────────────────────────────────────
     try:
-        from agents.communication.factory import build_email_notifier
+        from communication.factory import build_email_notifier
 
         email_notifier = build_email_notifier(config)
 
@@ -215,8 +215,8 @@ def save_schedule(input_json: str) -> str:
                 "telegram_sent": emp in telegram_sent,
                 "email_sent": emp in email_sent,
             }
-        output_dir = Path(__file__).resolve().parents[1] / "output"
-        output_dir.mkdir(exist_ok=True)
+        output_dir = DEFAULT_OUTPUT_DIR
+        output_dir.mkdir(parents=True, exist_ok=True)
         status_path = output_dir / f"{project_name}_notification_status.json"
         with open(status_path, "w", encoding="utf-8") as f:
             json.dump(notification_status, f, indent=2)

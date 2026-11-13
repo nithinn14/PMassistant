@@ -9,7 +9,7 @@ sends each one an email with the bot link and /start instructions.
 
 Usage:
     cd integrated_pm_assistant
-    python send_telegram_invite_to_all.py
+    python scripts/send_telegram_invite_to_all.py
 
 Prerequisites:
     - .env must have SENDER_EMAIL and SENDER_PASSWORD set
@@ -18,8 +18,11 @@ Prerequisites:
 
 import os
 import sys
+from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(__file__))
+_APP_ROOT = Path(__file__).resolve().parents[1]
+if str(_APP_ROOT) not in sys.path:
+    sys.path.insert(0, str(_APP_ROOT))
 
 # Load .env variables
 try:
@@ -30,7 +33,7 @@ except ImportError:
 
 from config_loader import load_config
 from data_backend import get_backend
-from agents.communication.notifiers.email_notifier import EmailNotifier
+from communication.email.email_notifier import EmailNotifier
 
 
 def main():
@@ -103,7 +106,7 @@ def main():
     print(f"{'─' * 50}")
     print(f"✅ Done! Sent: {sent} | Failed: {failed}")
     print(f"\n💡 Next step: Start the registration handler to capture /start responses:")
-    print(f"   python start_registration_listener.py")
+    print(f"   python scripts/start_registration_listener.py")
 
 
 if __name__ == "__main__":

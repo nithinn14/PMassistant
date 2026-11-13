@@ -1,7 +1,7 @@
 import json
 from .deterministic_agent import DeterministicAgent
-from tools.save_schedule_tool import save_schedule
-from tools.gantt_tool import generate_gantt_chart
+from tools.scheduling.save_schedule_tool import save_schedule
+from tools.scheduling.gantt_tool import generate_gantt_chart
 
 def scheduler_logic(input_text: str):
     try:

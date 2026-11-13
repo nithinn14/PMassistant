@@ -28,7 +28,7 @@ from google.adk.agents import SequentialAgent, LlmAgent
 from agents.deterministic_agent import DeterministicAgent
 from config_loader import load_config
 from data_backend import get_backend
-from tools.meeting_tools import (
+from meetings.tools.meeting_tools import (
     create_meeting_tool,
     check_rsvp_tool,
     send_reminder_tool,
@@ -69,7 +69,7 @@ def _meeting_creator_logic(input_text: str) -> str:
         return json.dumps({"error": f"Cannot read scheduled data: {e}"})
 
     # Create Kickoff meeting (deterministic — always needed for new projects)
-    from tools.meeting_tools import create_meeting
+    from meetings.tools.meeting_tools import create_meeting
     result = create_meeting(project_name=project_name, meeting_type="Kickoff")
 
     # Pass project info downstream to the LlmAgent for lifecycle management

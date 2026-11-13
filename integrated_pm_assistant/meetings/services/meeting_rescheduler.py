@@ -4,8 +4,8 @@ from pathlib import Path
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
-from tools.calendar_rsvp_reader import get_event_attendee_status
-from tools.gmail_proposal_reader import read_project_proposals
+from meetings.integrations.calendar_rsvp_reader import get_event_attendee_status
+from meetings.integrations.gmail_proposal_reader import read_project_proposals
 
 
 class MeetingRescheduler:

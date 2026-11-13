@@ -13,7 +13,7 @@ PRIMARY MODE - Embedded inside ResourceValidationAgent (ADK-native):
   No second terminal needed -- just run:  python main.py
 
 OPTIONAL standalone mode (kept for testing / manual use):
-      python telegram_bot.py
+      python communication/telegram/telegram_bot.py
 
 Supported commands:
   /add_employee          Interactive: Name -> Role -> Hours -> Email -> appends to employees.xlsx
@@ -35,12 +35,18 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+
+# Bootstrap: allow running from repo root
+_APP_ROOT = Path(__file__).resolve().parents[2]
+if str(_APP_ROOT) not in sys.path:
+    sys.path.insert(0, str(_APP_ROOT))
+
+
 from paths import APP_ROOT, resolve_path
 
 import requests
 
-# Bootstrap: allow running from repo root
-sys.path.insert(0, str(Path(__file__).parent))
+
 
 from data_backend import get_backend  # noqa: E402
 from config_loader import load_config  # noqa: E402
@@ -177,14 +183,14 @@ def handle_add_employee(bot: TelegramBot, chat_id: str, text: str) -> None:
         state["step"] = "await_email"
         bot.send(chat_id, f"Available Hours: {hours}\n\nNow enter the employee's email (or type 'skip'):")
         return
-    
+
     if step == "await_email":
         email_input = text.strip()
-        email = "" if email_input.lower() == "skip" else email_input        
-        
+        email = "" if email_input.lower() == "skip" else email_input
+
         name = state["name"]
         role = state["role"]
-        hours = state["hours"] 
+        hours = state["hours"]
         
         # Write new employee to Excel via shared data backend
         import pandas as pd

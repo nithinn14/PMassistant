@@ -1,6 +1,6 @@
 import pandas as pd
 from pathlib import Path
-from tools.calendar_rsvp_reader import get_event_attendee_status
+from meetings.integrations.calendar_rsvp_reader import get_event_attendee_status
 
 
 class ReminderService:

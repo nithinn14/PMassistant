@@ -1,6 +1,7 @@
 from google.adk.tools.function_tool import FunctionTool
 from pathlib import Path
 from typing import List
+from paths import DEFAULT_OUTPUT_DIR
 from .prd_pdf_writer import save_prd_pdf
 import json
 import warnings
@@ -89,8 +90,7 @@ def save_prd(
         "out_of_scope": out_of_scope,
     }
 
-    base_dir = Path(__file__).resolve().parent.parent
-    output_dir = base_dir / "output"
+    output_dir = DEFAULT_OUTPUT_DIR
     output_dir.mkdir(exist_ok=True)
 
     json_path = output_dir / f"{product_name}_PRD.json"

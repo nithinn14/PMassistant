@@ -14,7 +14,7 @@ Workflow:
 
 Usage:
     # Run once during onboarding / system startup:
-    from agents.communication.notifiers.telegram_registration_handler import TelegramRegistrationHandler
+    from communication.telegram.telegram_registration_handler import TelegramRegistrationHandler
     handler = TelegramRegistrationHandler(bot_token="...", pm_chat_id="...")
     handler.listen_for_registrations(timeout_seconds=300)  # blocking poll
 
@@ -36,7 +36,7 @@ from typing import Any, Dict, Optional
 
 import requests
 
-from tools.employee_database import (
+from communication.telegram.employee_database import (
     get_employee_by_name,
     update_telegram_chat_id,
 )

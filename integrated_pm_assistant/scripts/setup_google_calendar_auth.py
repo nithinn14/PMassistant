@@ -15,13 +15,12 @@ What happens:
     1. The script checks that credentials.json is present.
     2. It opens your default web browser and asks you to log into Google
        and approve access to Google Calendar.
-    3. Once you approve, the browser tab closes automatically and the
-       script saves the resulting token to token.json alongside this file.
+    3. Once you approve, the browser tab closes automatically and the script saves the resulting token to token.json in the application root..
     4. After that, all Calendar features in the app will work without any
        further manual steps.
 
 Usage (from the integrated_pm_assistant/ directory):
-    python setup_google_calendar_auth.py
+    python scripts/setup_google_calendar_auth.py
 
 Requirements:
     - credentials.json must exist in integrated_pm_assistant/ (download it
@@ -41,13 +40,19 @@ from pathlib import Path
 #   CREDENTIALS_PATH = BASE_DIR / "credentials.json"
 #   TOKEN_PATH       = BASE_DIR / "token.json"
 #
-# This script lives one level shallower (integrated_pm_assistant/ directly),
-# so Path(__file__).resolve().parent gives the same BASE_DIR.
+# This script lives inside scripts/, so parents[1] resolves to
+# integrated_pm_assistant/.
 
-BASE_DIR = Path(__file__).resolve().parent          # integrated_pm_assistant/
+_APP_ROOT = Path(__file__).resolve().parents[1]
+if str(_APP_ROOT) not in sys.path:
+    sys.path.insert(0, str(_APP_ROOT))
+
+from paths import APP_ROOT, CREDENTIALS_FILE, TOKEN_FILE
+
+BASE_DIR = APP_ROOT          # integrated_pm_assistant/
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
-CREDENTIALS_PATH = BASE_DIR / "credentials.json"
-TOKEN_PATH = BASE_DIR / "token.json"
+CREDENTIALS_PATH = CREDENTIALS_FILE
+TOKEN_PATH = TOKEN_FILE
 
 
 def main() -> None:

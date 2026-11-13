@@ -24,17 +24,17 @@ from google.adk.agents.invocation_context import InvocationContext
 from google.genai import types
 from google.adk.events.event import Event, EventActions
 
-from tools.resource_validator import (
+from tools.resources.resource_validator import (
     validate_resources,
     save_diagnostic_report,
     update_workflow_state,
     check_workflow_resolution,
 )
-from agents.communication.factory import build_notification_agent
-from agents.communication.notifiers.email_notifier import is_valid_email
+from communication.factory import build_notification_agent
+from communication.email.email_notifier import is_valid_email
 from data_backend import get_backend
 from config_loader import load_config
-from telegram_bot import run_telegram_listener
+from communication.telegram.telegram_bot import run_telegram_listener
 
 
 # ---------------------------------------------------------------------------

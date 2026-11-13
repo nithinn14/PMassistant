@@ -22,7 +22,7 @@ import os
 import re
 import time
 from .deterministic_agent import DeterministicAgent
-from tools.assign_employee_tool import assign_resources
+from tools.resources.assign_employee_tool import assign_resources
 
 
 # ── Custom exception ────────────────────────────────────────────────────────

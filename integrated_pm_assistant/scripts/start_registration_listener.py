@@ -9,13 +9,16 @@ It will keep polling until you stop it (Ctrl+C).
 
 Usage:
     cd integrated_pm_assistant
-    python start_registration_listener.py
+    python scripts/start_registration_listener.py
 """
 
 import os
 import sys
+from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(__file__))
+_APP_ROOT = Path(__file__).resolve().parents[1]
+if str(_APP_ROOT) not in sys.path:
+    sys.path.insert(0, str(_APP_ROOT))
 
 # Load .env variables
 try:
@@ -24,7 +27,7 @@ try:
 except ImportError:
     pass
 
-from agents.communication.factory import build_registration_handler
+from communication.factory import build_registration_handler
 from config_loader import load_config
 
 

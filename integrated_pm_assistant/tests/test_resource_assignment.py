@@ -5,7 +5,7 @@ import pandas as pd
 
 from data_backend.base import DataBackend
 from data_backend.registry import bind_backend, reset_bound_backend
-from tools.assign_employee_tool import assign_resources
+from tools.resources.assign_employee_tool import assign_resources
 
 
 class InMemoryBackend(DataBackend):

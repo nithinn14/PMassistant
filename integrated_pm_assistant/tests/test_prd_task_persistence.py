@@ -40,8 +40,8 @@ from data_backend.base import DataBackend
 from data_backend.excel_backend import ExcelBackend
 from data_backend.csv_backend import CSVBackend
 from data_backend.registry import bind_backend, reset_bound_backend
-from tools.save_prd_tool import save_prd
-from tools.save_tasks_tool import save_tasks
+from tools.prd.save_prd_tool import save_prd
+from tools.tasks.save_tasks_tool import save_tasks
 
 
 class InMemoryBackend(DataBackend):
@@ -85,15 +85,10 @@ class TestPrdPersistence(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.TemporaryDirectory()
         self.test_dir = Path(self.tmp_dir.name)
+        self.output_dir = self.test_dir / "output"
 
     def tearDown(self):
         self.tmp_dir.cleanup()
-
-    def _fake_path(self, arg):
-        """Redirect __file__ relative paths in save_prd_tool to the temporary directory."""
-        if "save_prd_tool" in str(arg):
-            return self.test_dir / "tools" / "save_prd_tool.py"
-        return Path(arg)
 
     def test_valid_prd_input_creates_expected_json(self):
         """Valid PRD input creates the expected JSON file with all required fields."""
@@ -107,8 +102,8 @@ class TestPrdPersistence(unittest.TestCase):
         out_of_scope = ["Mobile native app", "Billing integration"]
 
         buf = io.StringIO()
-        with patch("tools.save_prd_tool.Path", side_effect=self._fake_path), \
-             patch("tools.save_prd_tool.save_prd_pdf", return_value=str(self.test_dir / "mock.pdf")) as mock_pdf, \
+        with patch("tools.prd.save_prd_tool.DEFAULT_OUTPUT_DIR", self.output_dir), \
+             patch("tools.prd.save_prd_tool.save_prd_pdf", return_value=str(self.test_dir / "mock.pdf")) as mock_pdf, \
              contextlib.redirect_stdout(buf):
 
             res = save_prd(
@@ -144,8 +139,8 @@ class TestPrdPersistence(unittest.TestCase):
     def test_string_field_normalization_for_list_wrapped_inputs(self):
         """Single-item and multi-item list-wrapped strings are normalized with warnings."""
         buf = io.StringIO()
-        with patch("tools.save_prd_tool.Path", side_effect=self._fake_path), \
-             patch("tools.save_prd_tool.save_prd_pdf", return_value=str(self.test_dir / "mock.pdf")), \
+        with patch("tools.prd.save_prd_tool.DEFAULT_OUTPUT_DIR", self.output_dir), \
+             patch("tools.prd.save_prd_tool.save_prd_pdf", return_value=str(self.test_dir / "mock.pdf")), \
              contextlib.redirect_stdout(buf), \
              warnings.catch_warnings(record=True) as recorded_warnings:
 
@@ -182,8 +177,8 @@ class TestPrdPersistence(unittest.TestCase):
         mock_pdf_func = MagicMock(return_value="/mock/path/doc.pdf")
 
         buf = io.StringIO()
-        with patch("tools.save_prd_tool.Path", side_effect=self._fake_path), \
-             patch("tools.save_prd_tool.save_prd_pdf", mock_pdf_func), \
+        with patch("tools.prd.save_prd_tool.DEFAULT_OUTPUT_DIR", self.output_dir), \
+             patch("tools.prd.save_prd_tool.save_prd_pdf", mock_pdf_func), \
              contextlib.redirect_stdout(buf):
 
             save_prd(

@@ -58,7 +58,7 @@ def create_meeting(project_name: str, meeting_type: str) -> str:
     Returns:
         JSON string with meeting status and details.
     """
-    from tools.real_meet import notify_project_level_meetings
+    from meetings.integrations.real_meet import notify_project_level_meetings
 
     output_dir = _output_dir()
     excel_path = str(output_dir / f"{project_name}_Scheduled.xlsx")
@@ -88,7 +88,7 @@ def check_rsvp(project_name: str, meeting_type: str) -> str:
         JSON string with RSVP counts (accepted, declined, tentative, awaiting).
     """
     import pandas as pd
-    from agents.communication.services.rsvp_checker import RSVPChecker
+    from meetings.services.rsvp_checker import RSVPChecker
 
     output_dir = _output_dir()
     meetings_file = output_dir / f"{project_name}_Meetings.xlsx"
@@ -116,7 +116,7 @@ def check_rsvp(project_name: str, meeting_type: str) -> str:
 def _build_notifiers():
     config = load_config()
     smtp = config["smtp"]
-    from agents.communication.notifiers.email_notifier import EmailNotifier
+    from communication.email.email_notifier import EmailNotifier
     email_notifier = EmailNotifier(
         sender_email=os.environ[smtp["email_env"]],
         sender_password=os.environ[smtp["password_env"]],
@@ -130,7 +130,7 @@ def _build_notifiers():
         bot_token = os.environ.get(tg_cfg.get("bot_token_env", "TELEGRAM_BOT_TOKEN"), "")
         pm_chat_id = os.environ.get(tg_cfg.get("chat_id_env", "TELEGRAM_CHAT_ID"), "")
         if bot_token:
-            from agents.communication.notifiers.telegram_notifier import TelegramNotifier
+            from communication.telegram.telegram_notifier import TelegramNotifier
             telegram_notifier = TelegramNotifier(bot_token=bot_token, pm_chat_id=pm_chat_id)
     
     return email_notifier, telegram_notifier
@@ -146,7 +146,7 @@ def send_reminder(project_name: str, meeting_type: str) -> str:
     without proposing an alternative time. Only R/A role participants
     are escalated.
     """
-    from agents.communication.services.reminder_service import ReminderService
+    from meetings.services.reminder_service import ReminderService
 
     output_dir = _output_dir()
     email_notifier, telegram_notifier = _build_notifiers()
@@ -169,8 +169,8 @@ def reschedule_meeting(project_name: str, meeting_type: str) -> str:
     Check if a valid reschedule proposal exists (from Calendar or Gmail)
     and manage the semi-automated consensus gathering process.
     """
-    from agents.communication.services.meeting_rescheduler import MeetingRescheduler
-    from agents.communication.services.consensus_service import ConsensusService
+    from meetings.services.meeting_rescheduler import MeetingRescheduler
+    from meetings.services.consensus_service import ConsensusService
 
     output_dir = _output_dir()
     token = _token_path()

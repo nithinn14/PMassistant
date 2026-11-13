@@ -16,17 +16,17 @@ if str(BASE_DIR) not in sys.path:
 
 import pandas as pd
 
-import telegram_bot
-import sync_meetings
-from tools import real_meet
-from tools import meeting_tools
-from tools import calendar_rsvp_reader
-from tools import gmail_proposal_reader
+from communication.telegram import telegram_bot
+from scripts import sync_meetings
+from meetings.integrations import real_meet
+from meetings.tools import meeting_tools
+from meetings.integrations import calendar_rsvp_reader
+from meetings.integrations import gmail_proposal_reader
 
 from data_backend.registry import bind_backend, reset_bound_backend
-from tools.real_meet import notify_project_level_meetings
-from tools.save_prd_tool import save_prd
-from tools.save_schedule_tool import save_schedule
+from meetings.integrations.real_meet import notify_project_level_meetings
+from tools.prd.save_prd_tool import save_prd
+from tools.scheduling.save_schedule_tool import save_schedule
 
 
 class BasePathTestCase(unittest.TestCase):
@@ -45,7 +45,7 @@ class TestSavePrdToolPaths(BasePathTestCase):
     """Regression tests verifying tools.save_prd_tool file operations remain independent of CWD."""
 
     def test_save_prd_writes_to_file_anchored_output_dir_independent_of_cwd(self):
-        """save_prd writes PRD JSON to output dir anchored to __file__, regardless of process CWD."""
+        """save_prd writes PRD JSON to DEFAULT_OUTPUT_DIR, regardless of process CWD."""
         app_temp = tempfile.TemporaryDirectory()
         work_temp = tempfile.TemporaryDirectory()
         orig_cwd = os.getcwd()
@@ -54,10 +54,6 @@ class TestSavePrdToolPaths(BasePathTestCase):
             app_path = Path(app_temp.name)
             work_path = Path(work_temp.name)
 
-            # Fake module path: <app_path>/tools/save_prd_tool.py
-            fake_tool_path = app_path / "tools" / "save_prd_tool.py"
-            fake_tool_path.parent.mkdir(parents=True, exist_ok=True)
-
             expected_output_dir = app_path / "output"
             product_name = "IsolatedPrdProject"
             expected_json = expected_output_dir / f"{product_name}_PRD.json"
@@ -65,8 +61,8 @@ class TestSavePrdToolPaths(BasePathTestCase):
             # Change process working directory to separate work directory
             os.chdir(work_path)
 
-            with patch("tools.save_prd_tool.__file__", str(fake_tool_path)), \
-                 patch("tools.save_prd_tool.save_prd_pdf", return_value=str(expected_output_dir / "test.pdf")) as mock_pdf:
+            with patch("tools.prd.save_prd_tool.DEFAULT_OUTPUT_DIR", expected_output_dir), \
+                 patch("tools.prd.save_prd_tool.save_prd_pdf", return_value=str(expected_output_dir / "test.pdf")) as mock_pdf:
 
                 result = save_prd(
                     product_name=product_name,
@@ -108,7 +104,7 @@ class TestSaveScheduleToolPaths(BasePathTestCase):
     """Regression tests verifying tools.save_schedule_tool file operations remain independent of CWD."""
 
     def test_save_schedule_writes_status_to_file_anchored_output_dir_independent_of_cwd(self):
-        """save_schedule writes notification status to output dir anchored to __file__, regardless of CWD."""
+        """save_schedule writes notification status to DEFAULT_OUTPUT_DIR, regardless of CWD."""
         app_temp = tempfile.TemporaryDirectory()
         work_temp = tempfile.TemporaryDirectory()
         orig_cwd = os.getcwd()
@@ -136,11 +132,6 @@ class TestSaveScheduleToolPaths(BasePathTestCase):
 
             app_path = Path(app_temp.name)
             work_path = Path(work_temp.name)
-
-            # Fake module path: <app_path>/tools/save_schedule_tool.py
-            # Line 218 uses Path(__file__).resolve().parents[1] -> app_path
-            fake_tool_path = app_path / "tools" / "save_schedule_tool.py"
-            fake_tool_path.parent.mkdir(parents=True, exist_ok=True)
 
             expected_output_dir = app_path / "output"
             project_name = "IsolatedSchedProject"
@@ -173,9 +164,9 @@ class TestSaveScheduleToolPaths(BasePathTestCase):
                 ],
             })
 
-            with patch("tools.save_schedule_tool.__file__", str(fake_tool_path)), \
-                 patch("tools.save_schedule_tool.load_config", return_value=mock_cfg), \
-                 patch("agents.communication.factory.build_email_notifier") as mock_notifier:
+            with patch("tools.scheduling.save_schedule_tool.DEFAULT_OUTPUT_DIR", expected_output_dir), \
+                 patch("tools.scheduling.save_schedule_tool.load_config", return_value=mock_cfg), \
+                 patch("communication.factory.build_email_notifier") as mock_notifier:
 
                 # Disable email delivery by returning False from send
                 mock_mailer = MagicMock()
@@ -231,13 +222,13 @@ class TestRealMeetPaths(BasePathTestCase):
             app_path = Path(app_temp.name).resolve()
             work_path = Path(work_temp.name).resolve()
 
-            # Set up an isolated module source file under app_path/tools/real_meet.py
-            fake_tools_dir = app_path / "tools"
+            # Set up an isolated module source file under app_path/meetings/integrations/real_meet.py
+            fake_tools_dir = app_path / "meetings" / "integrations"
             fake_tools_dir.mkdir(parents=True, exist_ok=True)
             fake_real_meet_file = fake_tools_dir / "real_meet.py"
 
             # Copy actual real_meet.py source code to the isolated app structure
-            import tools.real_meet as rm_src
+            import meetings.integrations.real_meet as rm_src
             real_source_code = Path(rm_src.__file__).read_text(encoding="utf-8")
             fake_real_meet_file.write_text(real_source_code, encoding="utf-8")
 
@@ -326,11 +317,11 @@ class TestRealMeetPaths(BasePathTestCase):
                 },
             }
 
-            with patch("tools.real_meet.OUTPUT_DIR", expected_output_dir), \
-                 patch("tools.real_meet.BASE_DIR", app_path), \
-                 patch("tools.real_meet.create_calendar_event", return_value=mock_event) as mock_cal, \
+            with patch("meetings.integrations.real_meet.OUTPUT_DIR", expected_output_dir), \
+                 patch("meetings.integrations.real_meet.BASE_DIR", app_path), \
+                 patch("meetings.integrations.real_meet.create_calendar_event", return_value=mock_event) as mock_cal, \
                  patch("config_loader.load_config", return_value=mock_cfg), \
-                 patch("agents.communication.factory.build_email_notifier") as mock_mailer_factory:
+                 patch("communication.factory.build_email_notifier") as mock_mailer_factory:
 
                 mock_mailer = MagicMock()
                 mock_mailer.send.return_value = False
@@ -385,8 +376,8 @@ class TestRealMeetPaths(BasePathTestCase):
         try:
             app_path = Path(app_temp.name)
             work_path = Path(work_temp.name)
-            fake_module_path = app_path / "tools" / "real_meet.py"
-            fake_module_path.parent.mkdir(parents=True)
+            fake_module_path = app_path / "meetings" / "integrations" / "real_meet.py"
+            fake_module_path.parent.mkdir(parents=True, exist_ok=True)
             output_path = app_path / "output"
 
             source = Path(real_meet.__file__).read_text(encoding="utf-8")
@@ -433,8 +424,8 @@ class TestTelegramBotPaths(BasePathTestCase):
                 }
             }
 
-            with patch("telegram_bot.APP_ROOT", app_path), \
-                 patch("telegram_bot.load_config", return_value=config):
+            with patch("communication.telegram.telegram_bot.APP_ROOT", app_path), \
+                 patch("communication.telegram.telegram_bot.load_config", return_value=config):
                 result = telegram_bot._output_dir()
 
             self.assertEqual(result, app_path / "output")
@@ -466,8 +457,8 @@ class TestTelegramBotPaths(BasePathTestCase):
 
             os.chdir(work_path)
 
-            with patch("telegram_bot.APP_ROOT", app_path), \
-                 patch("telegram_bot.load_config", return_value=config):
+            with patch("communication.telegram.telegram_bot.APP_ROOT", app_path), \
+                 patch("communication.telegram.telegram_bot.load_config", return_value=config):
                 result = telegram_bot._output_dir()
 
             self.assertEqual(result, app_path / "storage" / "generated")
@@ -501,11 +492,11 @@ class TestSyncMeetingsPaths(BasePathTestCase):
             os.chdir(work_path)
 
             with (
-                patch("sync_meetings.DEFAULT_OUTPUT_DIR", output_path),
-                patch("sync_meetings.load_dotenv"),
+                patch("scripts.sync_meetings.DEFAULT_OUTPUT_DIR", output_path),
+                patch("scripts.sync_meetings.load_dotenv"),
                 patch("builtins.input", return_value="TestProject"),
                 patch(
-                    "sync_meetings.check_rsvp",
+                    "scripts.sync_meetings.check_rsvp",
                     return_value=json.dumps({
                         "counts": {
                             "accepted": 1,
@@ -515,10 +506,10 @@ class TestSyncMeetingsPaths(BasePathTestCase):
                     }),
                 ),
                 patch(
-                    "sync_meetings.reschedule_meeting",
+                    "scripts.sync_meetings.reschedule_meeting",
                     return_value=json.dumps({"status": "unchanged"}),
                 ),
-                patch("sync_meetings.send_reminder") as mock_reminder,
+                patch("scripts.sync_meetings.send_reminder") as mock_reminder,
             ):
                 captured = io.StringIO()
                 with contextlib.redirect_stdout(captured):
@@ -559,8 +550,8 @@ class TestMeetingToolsPaths(BasePathTestCase):
             os.chdir(work_path)
 
             with (
-                patch("tools.meeting_tools.APP_ROOT", app_path),
-                patch("tools.meeting_tools.load_config", return_value=config),
+                patch("meetings.tools.meeting_tools.APP_ROOT", app_path),
+                patch("meetings.tools.meeting_tools.load_config", return_value=config),
             ):
                 result = meeting_tools._output_dir()
 
@@ -577,7 +568,7 @@ class TestMeetingToolsPaths(BasePathTestCase):
     def test_token_path_uses_central_token_file(self):
         expected = Path("temporary_app") / "token.json"
 
-        with patch("tools.meeting_tools.TOKEN_FILE", expected):
+        with patch("meetings.tools.meeting_tools.TOKEN_FILE", expected):
             self.assertEqual(meeting_tools._token_path(), expected)
 
 
@@ -585,15 +576,15 @@ class TestCalendarRsvpReaderPaths(BasePathTestCase):
     def test_token_path_uses_central_token_file(self):
         expected = Path("temporary_app") / "token.json"
 
-        with patch("tools.calendar_rsvp_reader.TOKEN_FILE", expected):
+        with patch("meetings.integrations.calendar_rsvp_reader.TOKEN_FILE", expected):
             self.assertEqual(calendar_rsvp_reader.TOKEN_FILE, expected)
 
     def test_missing_token_returns_none_without_authentication(self):
         missing_token = Path("temporary_app") / "missing_token.json"
 
         with (
-            patch("tools.calendar_rsvp_reader.TOKEN_FILE", missing_token),
-            patch("tools.calendar_rsvp_reader.Credentials.from_authorized_user_file") as mock_credentials,
+            patch("meetings.integrations.calendar_rsvp_reader.TOKEN_FILE", missing_token),
+            patch("meetings.integrations.calendar_rsvp_reader.Credentials.from_authorized_user_file") as mock_credentials,
         ):
             result = calendar_rsvp_reader.get_event_attendee_status("test_event")
 

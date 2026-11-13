@@ -13,8 +13,8 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-from tools.gantt_tool import generate_gantt_chart
-from tools.resource_validator import (
+from tools.scheduling.gantt_tool import generate_gantt_chart
+from tools.resources.resource_validator import (
     check_workflow_resolution,
     record_notification_issues,
     save_diagnostic_report,
@@ -51,7 +51,7 @@ class TestResourceValidatorOutputPaths(BasePathTestCase):
                 ],
             }
 
-            with patch("tools.resource_validator.DEFAULT_OUTPUT_DIR", tmp_path):
+            with patch("tools.resources.resource_validator.DEFAULT_OUTPUT_DIR", tmp_path):
                 returned_path = save_diagnostic_report(project_name, validation_result)
 
                 expected_file = tmp_path / f"{project_name}_resource_diagnostic.json"
@@ -76,7 +76,7 @@ class TestResourceValidatorOutputPaths(BasePathTestCase):
                 {"employee": "Jane Smith", "channel": "email", "error": "SMTP connection timed out"},
             ]
 
-            with patch("tools.resource_validator.DEFAULT_OUTPUT_DIR", tmp_path):
+            with patch("tools.resources.resource_validator.DEFAULT_OUTPUT_DIR", tmp_path):
                 returned_path = record_notification_issues(project_name, issues)
 
                 expected_file = tmp_path / f"{project_name}_notification_issues.json"
@@ -104,7 +104,7 @@ class TestResourceValidatorOutputPaths(BasePathTestCase):
                 {"employee": "DevOps Lead", "channel": "email", "error": "Bounced"},
             ]
 
-            with patch("tools.resource_validator.DEFAULT_OUTPUT_DIR", tmp_path):
+            with patch("tools.resources.resource_validator.DEFAULT_OUTPUT_DIR", tmp_path):
                 # First create the diagnostic report in the temporary directory
                 diag_path_str = save_diagnostic_report(project_name, validation_result)
                 diag_file = Path(diag_path_str)
@@ -128,7 +128,7 @@ class TestResourceValidatorOutputPaths(BasePathTestCase):
             diag_path = str(tmp_path / f"{project_name}_resource_diagnostic.json")
             notification_issues = [{"employee": "Bob", "error": "Network unreachable"}]
 
-            with patch("tools.resource_validator.DEFAULT_OUTPUT_DIR", tmp_path):
+            with patch("tools.resources.resource_validator.DEFAULT_OUTPUT_DIR", tmp_path):
                 # Verify nonexistent project state returns NO_STATE_FILE
                 empty_state = check_workflow_resolution("NonexistentProject")
                 self.assertEqual(empty_state.get("resolution"), "NO_STATE_FILE")
@@ -179,7 +179,7 @@ class TestResourceValidatorOutputPaths(BasePathTestCase):
             }
             issues = [{"employee": "Sam", "channel": "email", "error": "Timeout"}]
 
-            with patch("tools.resource_validator.DEFAULT_OUTPUT_DIR", output_path):
+            with patch("tools.resources.resource_validator.DEFAULT_OUTPUT_DIR", output_path):
                 diag_path = save_diagnostic_report(project_name, validation_result)
                 issues_path = record_notification_issues(project_name, issues)
                 wf_path = update_workflow_state(
@@ -258,8 +258,8 @@ class TestGanttToolOutputPaths(BasePathTestCase):
 
             mock_fig = MagicMock()
 
-            with patch("tools.gantt_tool.DEFAULT_OUTPUT_DIR", tmp_path), \
-                 patch("tools.gantt_tool.px.timeline", return_value=mock_fig) as mock_timeline:
+            with patch("tools.scheduling.gantt_tool.DEFAULT_OUTPUT_DIR", tmp_path), \
+                 patch("tools.scheduling.gantt_tool.px.timeline", return_value=mock_fig) as mock_timeline:
 
                 result_json_str = generate_gantt_chart(json.dumps(payload))
                 result = json.loads(result_json_str)
@@ -316,8 +316,8 @@ class TestGanttToolOutputPaths(BasePathTestCase):
 
             mock_fig = MagicMock()
 
-            with patch("tools.gantt_tool.DEFAULT_OUTPUT_DIR", output_path), \
-                 patch("tools.gantt_tool.px.timeline", return_value=mock_fig) as mock_timeline:
+            with patch("tools.scheduling.gantt_tool.DEFAULT_OUTPUT_DIR", output_path), \
+                 patch("tools.scheduling.gantt_tool.px.timeline", return_value=mock_fig) as mock_timeline:
 
                 result_json_str = generate_gantt_chart(json.dumps(payload))
                 result = json.loads(result_json_str)

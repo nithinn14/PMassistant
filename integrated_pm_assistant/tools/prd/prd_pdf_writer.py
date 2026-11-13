@@ -1,13 +1,12 @@
-from pathlib import Path
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.pagesizes import A4
+from paths import DEFAULT_OUTPUT_DIR
 
 
 def save_prd_pdf(prd: dict, project_name: str):
 
-    base_dir = Path(__file__).resolve().parent.parent
-    output_dir = base_dir / "output"
+    output_dir = DEFAULT_OUTPUT_DIR
     output_dir.mkdir(exist_ok=True)
 
     file_path = output_dir / f"{project_name}_PRD.pdf"

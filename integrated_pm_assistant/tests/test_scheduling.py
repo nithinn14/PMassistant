@@ -12,8 +12,8 @@ import pandas as pd
 
 from data_backend.base import DataBackend
 from data_backend.registry import bind_backend, reset_bound_backend
-from tools.save_schedule_tool import add_working_days, save_schedule
-from tools.gantt_tool import _apply_dependency_scheduling, _work_days, _add_work_days
+from tools.scheduling.save_schedule_tool import add_working_days, save_schedule
+from tools.scheduling.gantt_tool import _apply_dependency_scheduling, _work_days, _add_work_days
 
 
 class _TestScheduleBackend(DataBackend):
@@ -506,17 +506,12 @@ class TestSchedulingRegressions(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmp_dir:
                 tmp_path = Path(tmp_dir)
 
-                def _fake_path(arg):
-                    if "save_schedule_tool" in str(arg):
-                        return tmp_path / "tools" / "save_schedule_tool.py"
-                    return Path(arg)
-
                 mock_cfg = {"telegram": {"enabled": False}, "email": {"enabled": False}}
                 buf = io.StringIO()
 
-                with patch("tools.save_schedule_tool.Path", side_effect=_fake_path), \
-                     patch("tools.save_schedule_tool.load_config", return_value=mock_cfg), \
-                     patch("agents.communication.factory.build_email_notifier") as mock_notifier, \
+                with patch("tools.scheduling.save_schedule_tool.DEFAULT_OUTPUT_DIR", tmp_path / "output"), \
+                     patch("tools.scheduling.save_schedule_tool.load_config", return_value=mock_cfg), \
+                     patch("communication.factory.build_email_notifier") as mock_notifier, \
                      redirect_stdout(buf):
 
                     mock_notifier.return_value = MagicMock()

@@ -1,6 +1,6 @@
 from google.adk.agents import LlmAgent
 from config_loader import load_config
-from tools.save_prd_tool import save_prd_tool
+from tools.prd.save_prd_tool import save_prd_tool
 
 
 def build_product_manager_agent():

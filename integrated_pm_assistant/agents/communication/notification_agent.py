@@ -22,9 +22,9 @@ PM-level system alerts:
 
 from typing import Any, Dict, List, Optional
 
-from agents.communication.notifiers.email_notifier import EmailNotifier, is_valid_email
-from agents.communication.notifiers.telegram_notifier import TelegramNotifier
-from tools.resource_validator import record_notification_issues
+from communication.email.email_notifier import EmailNotifier, is_valid_email
+from communication.telegram.telegram_notifier import TelegramNotifier
+from tools.resources.resource_validator import record_notification_issues
 
 
 class NotificationAgent:

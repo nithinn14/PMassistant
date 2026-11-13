@@ -26,7 +26,7 @@ from werkzeug.utils import secure_filename
 from dotenv import load_dotenv
 
 # Import meeting tools for sync endpoint
-from tools.meeting_tools import check_rsvp, send_reminder, reschedule_meeting
+from meetings.tools.meeting_tools import check_rsvp, send_reminder, reschedule_meeting
 
 load_dotenv(override=True)
 
