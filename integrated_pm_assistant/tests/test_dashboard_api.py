@@ -18,6 +18,10 @@ Regression tests for Dashboard and project-data API in api_server.py:
 3. GET /api/projects:
    - Empty output directory returns empty list
    - Projects sorted by modification time (mtime) descending
+4. GET /api/download/<filename>:
+   - Existing file returns 200, attachment header, and exact bytes
+   - Nonexistent file returns 404
+   - Encoded backslash directory traversal attempt returns 404
 """
 
 import json
@@ -35,6 +39,7 @@ if str(BASE_DIR) not in sys.path:
 
 import numpy as np
 import pandas as pd
+from fastapi.testclient import TestClient
 
 import api_server
 
@@ -44,8 +49,7 @@ class BaseDashboardTestCase(unittest.TestCase):
         self._orig_jobs = dict(api_server.jobs)
         self._orig_output_dir = api_server.OUTPUT_DIR
         api_server.jobs.clear()
-        api_server.app.config["TESTING"] = True
-        self.client = api_server.app.test_client()
+        self.client = TestClient(api_server.app)
 
         self.tmp_dir = tempfile.TemporaryDirectory()
         self.test_output_dir = Path(self.tmp_dir.name)
@@ -136,7 +140,7 @@ class TestProjectResultsEndpoint(BaseDashboardTestCase):
         """Nonexistent project returns 404 with error message."""
         response = self.client.get("/api/project-results/NonExistentProject")
         self.assertEqual(response.status_code, 404)
-        data = response.get_json()
+        data = response.json()
         self.assertIn("error", data)
         self.assertIn("No project found matching", data["error"])
 
@@ -147,7 +151,7 @@ class TestProjectResultsEndpoint(BaseDashboardTestCase):
 
         response = self.client.get("/api/project-results/Smart%20Tasks")
         self.assertEqual(response.status_code, 200)
-        data = response.get_json()
+        data = response.json()
         self.assertTrue(data.get("ambiguous"))
         self.assertEqual(data.get("query"), "Smart Tasks")
         self.assertEqual(sorted(data.get("matches", [])), ["Smart Tasks One", "Smart Tasks Two"])
@@ -222,7 +226,7 @@ class TestProjectResultsEndpoint(BaseDashboardTestCase):
         # Fetch results
         response = self.client.get(f"/api/project-results/{pname}")
         self.assertEqual(response.status_code, 200)
-        data = response.get_json()
+        data = response.json()
 
         # Validate top-level keys
         self.assertEqual(data["project_name"], pname)
@@ -274,7 +278,7 @@ class TestProjectResultsEndpoint(BaseDashboardTestCase):
         self.assertEqual(response.status_code, 200)
 
         # Confirm JSON parser accepts response without strict NaN errors
-        parsed = json.loads(response.data.decode("utf-8"))
+        parsed = json.loads(response.content.decode("utf-8"))
         tasks = parsed["tasks"]
         self.assertEqual(len(tasks), 2)
         self.assertIsNone(tasks[0]["notes"])
@@ -292,7 +296,7 @@ class TestProjectResultsEndpoint(BaseDashboardTestCase):
 
         response = self.client.get(f"/api/project-results/{pname}")
         self.assertEqual(response.status_code, 200)
-        data = response.get_json()
+        data = response.json()
 
         self.assertEqual(data["project_name"], pname)
         self.assertIn("prd", data)
@@ -310,7 +314,7 @@ class TestListProjectsEndpoint(BaseDashboardTestCase):
         """Empty output directory returns an empty projects array."""
         response = self.client.get("/api/projects")
         self.assertEqual(response.status_code, 200)
-        data = response.get_json()
+        data = response.json()
         self.assertEqual(data, {"projects": []})
 
     def test_list_projects_sorted_by_modification_time(self):
@@ -333,7 +337,7 @@ class TestListProjectsEndpoint(BaseDashboardTestCase):
 
         response = self.client.get("/api/projects")
         self.assertEqual(response.status_code, 200)
-        data = response.get_json()
+        data = response.json()
 
         projects = data.get("projects", [])
         self.assertEqual(len(projects), 2)
@@ -345,6 +349,34 @@ class TestListProjectsEndpoint(BaseDashboardTestCase):
         self.assertIn("files", projects[0])
         self.assertIn("modified", projects[0])
         self.assertGreaterEqual(projects[1]["files"], 2)
+
+
+class TestDownloadEndpoint(BaseDashboardTestCase):
+    """Tests for GET /api/download/<filename>."""
+
+    def test_download_existing_file_success(self):
+        """Existing file download returns 200, attachment header, and exact bytes."""
+        filename = "sample_artifact.json"
+        content = b'{"status": "ok", "project": "sample"}'
+        (self.test_output_dir / filename).write_bytes(content)
+
+        response = self.client.get(f"/api/download/{filename}")
+        self.assertEqual(response.status_code, 200)
+        content_disposition = response.headers.get("Content-Disposition", "")
+        self.assertIn("attachment", content_disposition)
+        self.assertIn(filename, content_disposition)
+        self.assertEqual(response.content, content)
+        response.close()
+
+    def test_download_missing_file_returns_404(self):
+        """Nonexistent file download returns 404."""
+        response = self.client.get("/api/download/nonexistent_file.json")
+        self.assertEqual(response.status_code, 404)
+
+    def test_download_encoded_backslash_traversal_returns_404(self):
+        """Path traversal attempt using encoded Windows backslash returns 404."""
+        response = self.client.get("/api/download/..%5Cconfig.yaml")
+        self.assertEqual(response.status_code, 404)
 
 
 if __name__ == "__main__":

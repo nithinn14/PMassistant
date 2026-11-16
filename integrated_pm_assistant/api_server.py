@@ -2,17 +2,21 @@
 """
 api_server.py
 ─────────────
-Flask REST API that wraps the existing ADK orchestrator.
+FastAPI REST API that wraps the existing ADK orchestrator.
 
 Endpoints:
-    POST /api/start-project      → launch pipeline in background thread
-    GET  /api/job-status/<id>    → poll progress / completion
-    GET  /api/project-results/<name> → structured results JSON
-    GET  /api/download/<filename>    → serve output files
+    POST /api/start-project          → launch pipeline in background thread
+    GET  /api/job-status/{id}        → poll progress / completion
+    GET  /api/project-results/{name} → structured results JSON
+    GET  /api/download/{filename}    → serve output files
+    POST /api/upload-file            → upload data files / smart merge
+    GET  /api/projects               → list available projects
+    POST /api/sync-meetings          → sync RSVPs & trigger reminders
+    GET  /api/ping                   → health check
 """
 
-import json, os, sys, re, io, uuid, threading, time, math, asyncio, yaml, contextvars
-from typing import Optional, Dict, Any, List
+import json, os, sys, re, io, uuid, threading, time, math, asyncio, yaml, contextvars, shutil
+from typing import Optional, Dict, Any, List, Union
 from pathlib import Path
 from datetime import datetime
 
@@ -20,8 +24,11 @@ from datetime import datetime
 sys.stdout.reconfigure(encoding="utf-8")
 sys.stderr.reconfigure(encoding="utf-8")
 
-from flask import Flask, request, jsonify, send_from_directory, Response
-from flask_cors import CORS
+from fastapi import FastAPI, UploadFile, File, HTTPException, status
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from starlette.responses import Response, FileResponse
+from pydantic import BaseModel
 from werkzeug.utils import secure_filename
 from dotenv import load_dotenv
 
@@ -33,8 +40,25 @@ load_dotenv(override=True)
 BASE_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = BASE_DIR / "output"
 
-app = Flask(__name__)
-CORS(app, origins=["http://localhost:5173", "http://127.0.0.1:5173"])
+app = FastAPI(title="PM Assistant API")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+class StartProjectRequest(BaseModel):
+    project_name: Optional[str] = None
+    project_description: Optional[str] = None
+    data_backend: Optional[str] = "excel"
+
+
+class SyncMeetingsRequest(BaseModel):
+    project_name: Optional[str] = None
+    meeting_type: Optional[str] = "Kickoff"
+
 
 def _sanitize(obj):
     """Recursively replace NaN / Infinity with None so JSON is valid."""
@@ -48,11 +72,24 @@ def _sanitize(obj):
 
 
 def _safe_jsonify(data, status=200):
-    """Return a Flask Response with sanitized JSON (no NaN)."""
-    from flask import Response
+    """Return a Response with sanitized JSON (no NaN)."""
     cleaned = _sanitize(data)
     body = json.dumps(cleaned, default=str, ensure_ascii=False)
-    return Response(body, status=status, mimetype="application/json")
+    return Response(content=body, status_code=status, media_type="application/json")
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request, exc: RequestValidationError):
+    first_err = exc.errors()[0] if exc.errors() else {}
+    msg = first_err.get("msg", "Validation error")
+    loc = " -> ".join(str(l) for l in first_err.get("loc", []))
+    err_msg = f"{loc}: {msg}" if loc else msg
+    return _safe_jsonify({"error": f"Invalid request: {err_msg}"}, status=400)
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request, exc: HTTPException):
+    return _safe_jsonify({"error": exc.detail}, status=exc.status_code)
 
 # ── In-memory job store ─────────────────────────────────────────────────────
 jobs: dict = {}
@@ -736,24 +773,24 @@ def _run_pipeline(job_id: str, project_name: str, project_description: str, back
             _current_job_id_var.reset(job_id_token)
 
 
-@app.route("/api/ping")
+@app.get("/api/ping")
 def ping():
-    return jsonify({"status": "ok", "time": datetime.now().isoformat()})
+    return _safe_jsonify({"status": "ok", "time": datetime.now().isoformat()})
 
 
 # ── API Routes ──────────────────────────────────────────────────────────────
 
-@app.route("/api/start-project", methods=["POST"])
-def start_project():
-    data = request.get_json(force=True)
-    project_name = data.get("project_name", "").strip()
-    project_description = data.get("project_description", "").strip()
-    backend_choice = data.get("data_backend", "excel").strip().lower()
+@app.post("/api/start-project")
+def start_project(req: Optional[StartProjectRequest] = None):
+    req_dict = req.model_dump() if req else {}
+    project_name = (req_dict.get("project_name") or "").strip()
+    project_description = (req_dict.get("project_description") or "").strip()
+    backend_choice = (req_dict.get("data_backend") or "excel").strip().lower()
 
     if not project_name or not project_description:
-        return jsonify({"error": "project_name and project_description are required"}), 400
+        return _safe_jsonify({"error": "project_name and project_description are required"}, status=400)
     if backend_choice not in ("excel", "csv", "sql", "odoo"):
-        return jsonify({"error": f"data_backend must be one of: excel, csv, sql, odoo (got '{backend_choice}')"}), 400
+        return _safe_jsonify({"error": f"data_backend must be one of: excel, csv, sql, odoo (got '{backend_choice}')"}, status=400)
 
     # Start background job
     job_id = str(uuid.uuid4())
@@ -781,12 +818,12 @@ def start_project():
     return _safe_jsonify({"job_id": job_id, "status": "running"})
 
 
-@app.route("/api/job-status/<job_id>")
-def job_status(job_id):
+@app.get("/api/job-status/{job_id}")
+def job_status(job_id: str):
     job = jobs.get(job_id)
     if not job:
-        return jsonify({"error": "Job not found"}), 404
-    return jsonify(
+        return _safe_jsonify({"error": "Job not found"}, status=404)
+    return _safe_jsonify(
         {
             "status": job["status"],
             "current_step": job["current_step"],
@@ -865,8 +902,8 @@ def resolve_project_name(query: str) -> tuple[Optional[str], List[str]]:
         return None, []
 
 
-@app.route("/api/project-results/<path:project_name>")
-def project_results(project_name):
+@app.get("/api/project-results/{project_name:path}")
+def project_results(project_name: str):
     import pandas as pd
 
     canonical_name, ambiguous_matches = resolve_project_name(project_name)
@@ -876,12 +913,12 @@ def project_results(project_name):
             "ambiguous": True,
             "query": project_name,
             "matches": ambiguous_matches,
-        }, 200)
+        }, status=200)
 
     if not canonical_name:
         return _safe_jsonify({
             "error": f"No project found matching '{project_name}'. Check the Projects page for available projects."
-        }, 404)
+        }, status=404)
 
     project_name = canonical_name
     result = {"project_name": project_name}
@@ -992,19 +1029,23 @@ def project_results(project_name):
     return _safe_jsonify(result)
 
 
-@app.route("/api/upload-file", methods=["POST"])
-def upload_file():
+@app.post("/api/upload-file")
+def upload_file(file: Union[UploadFile, str, None] = File(None)):
     """Accept an uploaded data file and save it to the output directory."""
-    if "file" not in request.files:
-        return _safe_jsonify({"error": "No file provided"}, 400)
-    f = request.files["file"]
-    if not f.filename:
-        return _safe_jsonify({"error": "Empty filename"}, 400)
-    ext = Path(f.filename).suffix.lower()
+    if file is None:
+        return _safe_jsonify({"error": "No file provided"}, status=400)
+    if isinstance(file, str) or not getattr(file, "filename", None):
+        return _safe_jsonify({"error": "Empty filename"}, status=400)
+    ext = Path(file.filename).suffix.lower()
     if ext not in (".xlsx", ".xls", ".csv", ".json"):
-        return _safe_jsonify({"error": "Only .xlsx, .csv, .json files are accepted"}, 400)
-    safe_name = secure_filename(f.filename)
+        return _safe_jsonify({"error": "Only .xlsx, .csv, .json files are accepted"}, status=400)
+    safe_name = secure_filename(file.filename)
     dest = BASE_DIR / safe_name
+
+    def _save_file(target_path):
+        file.file.seek(0)
+        with open(target_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
 
     # Smart merge for employees.xlsx to prevent workload data loss
     if safe_name == "employees.xlsx" and dest.exists():
@@ -1013,7 +1054,7 @@ def upload_file():
             print(f"📊 [Server] Smart Merge: {safe_name} detected. Preserving project history...")
             old_df = pd.read_excel(dest)
             temp_path = str(dest) + ".tmp"
-            f.save(temp_path)
+            _save_file(temp_path)
             new_df = pd.read_excel(temp_path)
             os.remove(temp_path)
 
@@ -1065,24 +1106,40 @@ def upload_file():
             new_df.to_excel(dest, index=False)
             return _safe_jsonify({"saved_as": safe_name, "merged": False, "reason": "No common key found"})
 
-
         except Exception as e:
             print(f"❌ [Server] Smart Merge failed: {str(e)}")
             # Fallback in case of error
-            f.save(str(dest))
+            _save_file(dest)
             return _safe_jsonify({"saved_as": safe_name, "error_merging": str(e)})
 
-    f.save(str(dest))
+    _save_file(dest)
     return _safe_jsonify({"saved_as": safe_name, "path": str(dest)})
 
 
+@app.get("/api/download/{filename}")
+def download_file(filename: str):
+    if "/" in filename or "\\" in filename:
+        return _safe_jsonify({"error": "File not found"}, status=404)
 
-@app.route("/api/download/<filename>")
-def download_file(filename):
-    return send_from_directory(str(OUTPUT_DIR), filename, as_attachment=True)
+    file_path = (OUTPUT_DIR / filename).resolve()
+    output_dir_resolved = OUTPUT_DIR.resolve()
+
+    try:
+        file_path.relative_to(output_dir_resolved)
+    except ValueError:
+        return _safe_jsonify({"error": "File not found"}, status=404)
+
+    if not file_path.is_file():
+        return _safe_jsonify({"error": "File not found"}, status=404)
+
+    return FileResponse(
+        path=str(file_path),
+        filename=file_path.name,
+        media_type="application/octet-stream",
+    )
 
 
-@app.route("/api/projects")
+@app.get("/api/projects")
 def list_projects():
     """List all generated projects by scanning *_PRD.json in the output dir."""
     projects = []
@@ -1101,21 +1158,21 @@ def list_projects():
     return _safe_jsonify({"projects": projects})
 
 
-@app.route("/api/sync-meetings", methods=["POST"])
-def sync_meetings():
+@app.post("/api/sync-meetings")
+def sync_meetings(req: Optional[SyncMeetingsRequest] = None):
     """Sync RSVPs, send reminders, and potentially reschedule meetings."""
-    data = request.get_json(force=True)
-    project_name = data.get("project_name", "").strip()
-    meeting_type = data.get("meeting_type", "Kickoff").strip()
+    req_dict = req.model_dump() if req else {}
+    project_name = (req_dict.get("project_name") or "").strip()
+    meeting_type = (req_dict.get("meeting_type") or "Kickoff").strip()
 
     if not project_name:
-        return _safe_jsonify({"error": "project_name is required"}, 400)
+        return _safe_jsonify({"error": "project_name is required"}, status=400)
 
     try:
         # Step 1: Check RSVP
         rsvp_res = json.loads(check_rsvp(project_name, meeting_type))
         if "error" in rsvp_res:
-            return _safe_jsonify({"error": rsvp_res["error"]}, 400)
+            return _safe_jsonify({"error": rsvp_res["error"]}, status=400)
 
         counts = rsvp_res.get("counts", {})
 
@@ -1130,22 +1187,15 @@ def sync_meetings():
         return project_results(project_name)
 
     except Exception as e:
-        return _safe_jsonify({"error": str(e)}, 500)
+        return _safe_jsonify({"error": str(e)}, status=500)
 
 
 if __name__ == "__main__":
-    import logging
-    # Suppress Flask/Werkzeug default logs and banner for a clean terminal
-    log = logging.getLogger('werkzeug')
-    log.setLevel(logging.ERROR)
-    
-    # Silence the Flask "Running on..." banner
-    import flask.cli
-    #flask.cli.show_server_banner = lambda *args: None
+    import uvicorn
     
     print("\n" + "=" * 60)
     print("🚀 PM Assistant is ready!")
     print("👉 Open the Web UI here: http://localhost:5173")
     print("=" * 60 + "\n")
     
-    app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False)
+    uvicorn.run(app, host="0.0.0.0", port=5000, log_level="info", workers=1)

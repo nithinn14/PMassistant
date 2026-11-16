@@ -30,7 +30,7 @@ An integrated AI-powered system that automates project management tasks, from in
 
 ## Prerequisites
 
-- **Python 3.10+**
+- **Python 3.11+**
 - **Node.js 18+**
 
 ## Configuration & Environment Variables
@@ -91,7 +91,7 @@ pip install -r requirements.txt
 python api_server.py
 ```
 
-*The backend API will run, typically listening on `http://127.0.0.1:8000` or the port specified.*
+**The backend API will be available at `http://127.0.0.1:5000`.**
 
 ### 2. Frontend Setup
 

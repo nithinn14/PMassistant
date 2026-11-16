@@ -14,6 +14,7 @@ import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
+from fastapi.testclient import TestClient
 
 # Ensure integrated_pm_assistant is on sys.path
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -29,8 +30,7 @@ class TestApiServerRegressions(unittest.TestCase):
         self._orig_jobs = dict(api_server.jobs)
         self._orig_stdout = sys.stdout
         api_server.jobs.clear()
-        api_server.app.config["TESTING"] = True
-        self.client = api_server.app.test_client()
+        self.client = TestClient(api_server.app)
 
     def tearDown(self):
         # Restore global state cleanly
@@ -72,7 +72,7 @@ class TestApiServerRegressions(unittest.TestCase):
 
                 # Assert HTTP 200 and expected response structure
                 self.assertEqual(response.status_code, 200)
-                data = response.get_json()
+                data = response.json()
                 self.assertIn("job_id", data)
                 self.assertEqual(data["status"], "running")
 
@@ -234,6 +234,62 @@ class TestApiServerRegressions(unittest.TestCase):
         finally:
             finish_jobs.set()
 
+    @patch("api_server._run_pipeline")
+    def test_testclient_concurrent_job_creation_and_polling(self, mock_pipeline):
+        """
+        Verify that multiple concurrent client requests via FastAPI TestClient
+        create distinct jobs and poll their status without cross-contamination.
+        """
+        num_clients = 5
+        job_ids = [None] * num_clients
+        barrier = threading.Barrier(num_clients)
+        errors = []
+
+        def client_worker(idx):
+            try:
+                barrier.wait(timeout=5.0)
+                client = TestClient(api_server.app)
+                res = client.post(
+                    "/api/start-project",
+                    json={
+                        "project_name": f"Concurrent Project {idx}",
+                        "project_description": f"Testing concurrent job {idx}",
+                        "data_backend": "excel",
+                    },
+                )
+                self.assertEqual(res.status_code, 200)
+                data = res.json()
+                jid = data["job_id"]
+                job_ids[idx] = jid
+
+                # Now poll job status
+                poll_res = client.get(f"/api/job-status/{jid}")
+                self.assertEqual(poll_res.status_code, 200)
+                poll_data = poll_res.json()
+                self.assertEqual(poll_data["project_name"], f"Concurrent Project {idx}")
+                self.assertEqual(poll_data["status"], "running")
+            except BaseException as e:
+                errors.append(e)
+
+        threads = [
+            threading.Thread(target=client_worker, args=(i,))
+            for i in range(num_clients)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10.0)
+
+        for i, t in enumerate(threads):
+            self.assertFalse(t.is_alive(), f"Worker thread {i} failed to finish")
+
+        if errors:
+            raise errors[0]
+
+        # Verify all 5 jobs have unique UUIDs
+        self.assertEqual(len(set(job_ids)), num_clients)
+        self.assertNotIn(None, job_ids)
+
 
 class TestBackendContextIsolation(unittest.TestCase):
     """Tests that the contextvars-based backend binding isolates each thread."""
@@ -309,6 +365,205 @@ class TestBackendContextIsolation(unittest.TestCase):
             backend_b,
             "Thread B's get_backend() returned the wrong backend",
         )
+
+
+class TestLiveUvicornServer(unittest.TestCase):
+    """
+    Live Uvicorn server test on an ephemeral socket:
+    Verifies that the FastAPI application runs properly under Uvicorn, serves live
+    HTTP requests over real TCP, and preserves log isolation across concurrent threads.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import socket
+        import time
+        import uvicorn
+        import httpx
+
+        # Save initial jobs dict contents before live server tests
+        cls._orig_jobs = dict(api_server.jobs)
+        api_server.jobs.clear()
+
+        # Allocate free ephemeral port
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        cls.port = sock.getsockname()[1]
+        sock.close()
+
+        config = uvicorn.Config(api_server.app, host="127.0.0.1", port=cls.port, log_level="error")
+        cls.server = uvicorn.Server(config=config)
+        cls.server_thread = threading.Thread(target=cls.server.run, daemon=True)
+        cls.server_thread.start()
+
+        # Wait for live server to become responsive
+        cls.base_url = f"http://127.0.0.1:{cls.port}"
+        ready = False
+        try:
+            with httpx.Client(base_url=cls.base_url, timeout=5.0) as client:
+                for _ in range(50):
+                    try:
+                        res = client.get("/api/ping")
+                        if res.status_code == 200:
+                            ready = True
+                            break
+                    except Exception:
+                        time.sleep(0.05)
+            if not ready:
+                raise RuntimeError("Live Uvicorn server failed to start within timeout")
+        except Exception:
+            # Ensure the Uvicorn server is stopped and its thread joined if startup fails
+            cls.server.should_exit = True
+            cls.server_thread.join(timeout=5.0)
+            if cls.server_thread.is_alive():
+                raise AssertionError("Uvicorn server thread is still alive after failed startup")
+            api_server.jobs.clear()
+            api_server.jobs.update(cls._orig_jobs)
+            raise
+
+    @classmethod
+    def tearDownClass(cls):
+        try:
+            if hasattr(cls, "server"):
+                cls.server.should_exit = True
+            if hasattr(cls, "server_thread"):
+                cls.server_thread.join(timeout=5.0)
+                if cls.server_thread.is_alive():
+                    raise AssertionError("Uvicorn server thread is still alive after shutdown")
+        finally:
+            # Restore original jobs dict contents after live server tests
+            api_server.jobs.clear()
+            api_server.jobs.update(cls._orig_jobs)
+
+    def setUp(self):
+        # Save and isolate jobs per test
+        self._test_orig_jobs = dict(api_server.jobs)
+        api_server.jobs.clear()
+
+    def tearDown(self):
+        # Restore jobs per test
+        api_server.jobs.clear()
+        api_server.jobs.update(self._test_orig_jobs)
+
+    def test_live_server_ping(self):
+        """Verify that a live Uvicorn server serves /api/ping over real TCP."""
+        import httpx
+
+        with httpx.Client(base_url=self.base_url, timeout=5.0) as client:
+            ping_res = client.get("/api/ping")
+            self.assertEqual(ping_res.status_code, 200)
+            self.assertEqual(ping_res.json().get("status"), "ok")
+
+    def test_live_uvicorn_concurrent_start_project_and_log_isolation(self):
+        """
+        Verify that a live Uvicorn server concurrently handles POST /api/start-project,
+        polls GET /api/job-status/{job_id}, assigns distinct IDs, and maintains strict
+        log isolation without cross-contamination.
+        """
+        import time
+        import httpx
+
+        overlap_barrier = threading.Barrier(2)
+        pipeline1_done = threading.Event()
+        pipeline2_done = threading.Event()
+
+        def mock_pipeline(job_id, project_name, project_description, backend_choice):
+            capture = api_server.OutputCapture(job_id)
+            api_server.jobs[job_id]["_capture"] = capture
+            token = api_server._current_job_id_var.set(job_id)
+            try:
+                # Synchronize both pipeline threads so their execution and print statements overlap
+                overlap_barrier.wait(timeout=5.0)
+                print(f"PIPELINE_MARKER_{project_name}")
+                api_server.jobs[job_id]["current_step"] = "Generating PRD..."
+                api_server.jobs[job_id]["completed_steps"].append("Initializing...")
+            finally:
+                api_server.jobs[job_id]["logs"] = capture.lines
+                api_server._current_job_id_var.reset(token)
+                if project_name == "LiveProjectA":
+                    pipeline1_done.set()
+                else:
+                    pipeline2_done.set()
+
+        client_barrier = threading.Barrier(2)
+        responses = [None, None]
+        client_errors = []
+
+        def client_post_project(idx, name, desc):
+            try:
+                client_barrier.wait(timeout=5.0)
+                with httpx.Client(base_url=self.base_url, timeout=10.0) as client:
+                    resp = client.post(
+                        "/api/start-project",
+                        json={
+                            "project_name": name,
+                            "project_description": desc,
+                            "data_backend": "excel",
+                        },
+                    )
+                    responses[idx] = resp
+            except Exception as exc:
+                client_errors.append(exc)
+
+        with patch.object(api_server, "_run_pipeline", side_effect=mock_pipeline):
+            t1 = threading.Thread(target=client_post_project, args=(0, "LiveProjectA", "Description A"))
+            t2 = threading.Thread(target=client_post_project, args=(1, "LiveProjectB", "Description B"))
+
+            t1.start()
+            t2.start()
+
+            t1.join(timeout=10.0)
+            t2.join(timeout=10.0)
+
+            # Assert client worker threads finished before checking results
+            self.assertFalse(t1.is_alive(), "Client thread 1 failed to finish")
+            self.assertFalse(t2.is_alive(), "Client thread 2 failed to finish")
+
+            if client_errors:
+                raise client_errors[0]
+
+            # Verify both HTTP responses
+            self.assertEqual(responses[0].status_code, 200)
+            self.assertEqual(responses[1].status_code, 200)
+
+            job1_id = responses[0].json().get("job_id")
+            job2_id = responses[1].json().get("job_id")
+
+            # Verify both jobs have distinct IDs
+            self.assertIsNotNone(job1_id)
+            self.assertIsNotNone(job2_id)
+            self.assertNotEqual(job1_id, job2_id)
+
+            # Wait for background pipeline threads to complete their log capture
+            self.assertTrue(pipeline1_done.wait(timeout=5.0), "Pipeline for LiveProjectA did not complete")
+            self.assertTrue(pipeline2_done.wait(timeout=5.0), "Pipeline for LiveProjectB did not complete")
+
+            # Poll both jobs through HTTP GET /api/job-status/{job_id}
+            with httpx.Client(base_url=self.base_url, timeout=10.0) as client:
+                poll1 = client.get(f"/api/job-status/{job1_id}")
+                poll2 = client.get(f"/api/job-status/{job2_id}")
+
+            self.assertEqual(poll1.status_code, 200)
+            self.assertEqual(poll2.status_code, 200)
+
+            status1_data = poll1.json()
+            status2_data = poll2.json()
+
+            # Verify correct project names and running status
+            self.assertEqual(status1_data["project_name"], "LiveProjectA")
+            self.assertEqual(status2_data["project_name"], "LiveProjectB")
+            self.assertEqual(status1_data["status"], "running")
+            self.assertEqual(status2_data["status"], "running")
+
+            # Verify logs remain isolated with no cross-contamination
+            logs1 = api_server.jobs[job1_id]["logs"]
+            logs2 = api_server.jobs[job2_id]["logs"]
+
+            self.assertIn("PIPELINE_MARKER_LiveProjectA", logs1)
+            self.assertNotIn("PIPELINE_MARKER_LiveProjectB", logs1)
+
+            self.assertIn("PIPELINE_MARKER_LiveProjectB", logs2)
+            self.assertNotIn("PIPELINE_MARKER_LiveProjectA", logs2)
 
 
 if __name__ == "__main__":
