@@ -42,24 +42,32 @@ import pandas as pd
 from fastapi.testclient import TestClient
 
 import api_server
+import api.services.files
+import api.services.projects
 
 
 class BaseDashboardTestCase(unittest.TestCase):
     def setUp(self):
         self._orig_jobs = dict(api_server.jobs)
         self._orig_output_dir = api_server.OUTPUT_DIR
+        self._orig_projects_output_dir = api.services.projects.OUTPUT_DIR
+        self._orig_files_output_dir = api.services.files.OUTPUT_DIR
         api_server.jobs.clear()
         self.client = TestClient(api_server.app)
 
         self.tmp_dir = tempfile.TemporaryDirectory()
         self.test_output_dir = Path(self.tmp_dir.name)
         api_server.OUTPUT_DIR = self.test_output_dir
+        api.services.projects.OUTPUT_DIR = self.test_output_dir
+        api.services.files.OUTPUT_DIR = self.test_output_dir
 
     def tearDown(self):
         self.tmp_dir.cleanup()
         api_server.jobs.clear()
         api_server.jobs.update(self._orig_jobs)
         api_server.OUTPUT_DIR = self._orig_output_dir
+        api.services.projects.OUTPUT_DIR = self._orig_projects_output_dir
+        api.services.files.OUTPUT_DIR = self._orig_files_output_dir
 
 
 class TestResolveProjectName(BaseDashboardTestCase):

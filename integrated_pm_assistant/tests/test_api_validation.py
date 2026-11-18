@@ -51,6 +51,7 @@ if str(BASE_DIR) not in sys.path:
 import pandas as pd
 from fastapi.testclient import TestClient
 import api_server
+import api.services.files
 
 
 class BaseApiValidationTestCase(unittest.TestCase):
@@ -58,20 +59,29 @@ class BaseApiValidationTestCase(unittest.TestCase):
         self._orig_jobs = dict(api_server.jobs)
         self._orig_base_dir = api_server.BASE_DIR
         self._orig_output_dir = api_server.OUTPUT_DIR
+        self._orig_files_base_dir = api.services.files.BASE_DIR
+        self._orig_files_output_dir = api.services.files.OUTPUT_DIR
         api_server.jobs.clear()
         self.client = TestClient(api_server.app)
+        self.client.__enter__()
 
         self.tmp_dir = tempfile.TemporaryDirectory()
         self.test_base_dir = Path(self.tmp_dir.name)
         api_server.BASE_DIR = self.test_base_dir
         api_server.OUTPUT_DIR = self.test_base_dir / "output"
+        api.services.files.BASE_DIR = self.test_base_dir
+        api.services.files.OUTPUT_DIR = self.test_base_dir / "output"
 
     def tearDown(self):
+        if hasattr(self, "client"):
+            self.client.__exit__(None, None, None)
         self.tmp_dir.cleanup()
         api_server.jobs.clear()
         api_server.jobs.update(self._orig_jobs)
         api_server.BASE_DIR = self._orig_base_dir
         api_server.OUTPUT_DIR = self._orig_output_dir
+        api.services.files.BASE_DIR = self._orig_files_base_dir
+        api.services.files.OUTPUT_DIR = self._orig_files_output_dir
 
 
 # ==============================================================================
@@ -137,7 +147,7 @@ class TestStartProjectValidation(BaseApiValidationTestCase):
         self.assertIn("error", data)
         self.assertIn("data_backend must be one of", data["error"])
 
-    @patch("api_server.threading.Thread")
+    @patch("api.routes.jobs.threading.Thread")
     def test_start_project_valid_spawns_job(self, mock_thread_cls):
         """Valid request returns job_id and running status without running the real pipeline."""
         mock_thread_instance = MagicMock()
@@ -166,7 +176,7 @@ class TestStartProjectValidation(BaseApiValidationTestCase):
         self.assertTrue(mock_thread_instance.daemon)
         mock_thread_instance.start.assert_called_once()
 
-    @patch("api_server.threading.Thread")
+    @patch("api.routes.jobs.threading.Thread")
     def test_start_project_omitted_backend_defaults_to_excel(self, mock_thread_cls):
         """When data_backend is omitted, it defaults to 'excel' and spawns the job."""
         mock_thread_instance = MagicMock()
@@ -478,7 +488,7 @@ class TestSyncMeetingsApi(BaseApiValidationTestCase):
         self.assertEqual(res2.status_code, 400)
         self.assertEqual(res2.json(), {"error": "project_name is required"})
 
-    @patch("api_server.check_rsvp")
+    @patch("api.routes.meetings.check_rsvp")
     def test_sync_meetings_rsvp_error_returns_400(self, mock_check_rsvp):
         """When check_rsvp returns an error payload, returns 400 and exact error JSON."""
         mock_check_rsvp.return_value = json.dumps({"error": "No meetings file found for 'Test Project'"})
@@ -487,10 +497,10 @@ class TestSyncMeetingsApi(BaseApiValidationTestCase):
         self.assertEqual(res.status_code, 400)
         self.assertEqual(res.json(), {"error": "No meetings file found for 'Test Project'"})
 
-    @patch("api_server.project_results")
-    @patch("api_server.reschedule_meeting")
-    @patch("api_server.send_reminder")
-    @patch("api_server.check_rsvp")
+    @patch("api.routes.meetings.project_results")
+    @patch("api.routes.meetings.reschedule_meeting")
+    @patch("api.routes.meetings.send_reminder")
+    @patch("api.routes.meetings.check_rsvp")
     def test_sync_meetings_orchestration_with_declined_participants(
         self, mock_check_rsvp, mock_send_reminder, mock_reschedule, mock_project_results
     ):
@@ -516,10 +526,10 @@ class TestSyncMeetingsApi(BaseApiValidationTestCase):
         mock_reschedule.assert_called_once_with("Test Project", "Kickoff")
         mock_project_results.assert_called_once_with("Test Project")
 
-    @patch("api_server.project_results")
-    @patch("api_server.reschedule_meeting")
-    @patch("api_server.send_reminder")
-    @patch("api_server.check_rsvp")
+    @patch("api.routes.meetings.project_results")
+    @patch("api.routes.meetings.reschedule_meeting")
+    @patch("api.routes.meetings.send_reminder")
+    @patch("api.routes.meetings.check_rsvp")
     def test_sync_meetings_orchestration_without_declined_participants(
         self, mock_check_rsvp, mock_send_reminder, mock_reschedule, mock_project_results
     ):
@@ -545,7 +555,7 @@ class TestSyncMeetingsApi(BaseApiValidationTestCase):
         mock_reschedule.assert_called_once_with("Test Project", "Kickoff")
         mock_project_results.assert_called_once_with("Test Project")
 
-    @patch("api_server.check_rsvp")
+    @patch("api.routes.meetings.check_rsvp")
     def test_sync_meetings_unexpected_exception_returns_500(self, mock_check_rsvp):
         """Unexpected exception in sync flow returns 500 and exact error JSON."""
         mock_check_rsvp.side_effect = RuntimeError("Google Calendar API connection refused")

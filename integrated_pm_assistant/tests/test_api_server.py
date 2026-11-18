@@ -57,10 +57,12 @@ class TestApiServerRegressions(unittest.TestCase):
             tmp_config = tmp_path / "config.yaml"
             tmp_config.write_text(initial_yaml_content, encoding="utf-8")
 
-            # Patch BASE_DIR to redirect config_path to our temporary directory
-            # and patch _run_pipeline to prevent real thread/pipeline execution
+            # Patch api_server.BASE_DIR (facade attribute, kept for future use).
+            # _run_pipeline is patched in its dispatch module api.routes.jobs so
+            # the mocked pipeline is called by the route handler; this prevents
+            # any real pipeline thread from running or touching config.yaml.
             with patch.object(api_server, "BASE_DIR", tmp_path), \
-                 patch.object(api_server, "_run_pipeline") as mock_pipeline:
+                 patch("api.routes.jobs._run_pipeline") as mock_pipeline:
 
                 payload = {
                     "project_name": "Test Non-Mutating Project",
@@ -234,7 +236,7 @@ class TestApiServerRegressions(unittest.TestCase):
         finally:
             finish_jobs.set()
 
-    @patch("api_server._run_pipeline")
+    @patch("api.routes.jobs._run_pipeline")
     def test_testclient_concurrent_job_creation_and_polling(self, mock_pipeline):
         """
         Verify that multiple concurrent client requests via FastAPI TestClient
@@ -505,7 +507,7 @@ class TestLiveUvicornServer(unittest.TestCase):
             except Exception as exc:
                 client_errors.append(exc)
 
-        with patch.object(api_server, "_run_pipeline", side_effect=mock_pipeline):
+        with patch("api.routes.jobs._run_pipeline", side_effect=mock_pipeline):
             t1 = threading.Thread(target=client_post_project, args=(0, "LiveProjectA", "Description A"))
             t2 = threading.Thread(target=client_post_project, args=(1, "LiveProjectB", "Description B"))
 
