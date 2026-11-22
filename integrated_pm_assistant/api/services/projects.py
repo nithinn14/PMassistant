@@ -120,6 +120,22 @@ def load_project_results(project_name: str, output_dir: Optional[Path] = None) -
 
     project_name = canonical_name
     result = {"project_name": project_name}
+    # Project integration settings (default to enabled for older projects)
+    integrations_path = output_dir / f"{project_name}_integrations.json"
+    result["integrations"] = {
+        "google_calendar": True,
+        "gmail": True,
+        "telegram": True,
+        "gantt": True,
+    }
+
+    if integrations_path.exists():
+        try:
+            with open(integrations_path, "r", encoding="utf-8") as f:
+                saved_integrations = json.load(f)
+            result["integrations"].update(saved_integrations)
+        except (json.JSONDecodeError, OSError) as exc:
+            print(f"Could not read integration settings for '{project_name}': {exc}")
 
     # PRD JSON
     prd_json_path = output_dir / f"{project_name}_PRD.json"

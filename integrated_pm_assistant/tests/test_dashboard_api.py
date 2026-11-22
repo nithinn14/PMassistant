@@ -31,6 +31,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 # Ensure integrated_pm_assistant is on sys.path
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -69,6 +70,45 @@ class BaseDashboardTestCase(unittest.TestCase):
         api.services.projects.OUTPUT_DIR = self._orig_projects_output_dir
         api.services.files.OUTPUT_DIR = self._orig_files_output_dir
 
+class TestProjectIntegrationPersistence(unittest.TestCase):
+    """Tests for saving per-project integration settings."""
+
+    def test_save_selected_integrations(self):
+        from api.services.pipeline import _save_project_integrations
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with patch("api.services.pipeline.DEFAULT_OUTPUT_DIR", Path(tmp_dir)):
+                integrations = {
+                    "google_calendar": False,
+                    "gmail": False,
+                    "telegram": True,
+                    "gantt": False,
+                }
+
+                _save_project_integrations("Test Project", integrations)
+
+                saved_path = Path(tmp_dir) / "Test Project_integrations.json"
+                self.assertTrue(saved_path.exists())
+
+                saved = json.loads(saved_path.read_text(encoding="utf-8"))
+                self.assertEqual(saved, integrations)
+
+    def test_save_none_defaults_all_integrations_enabled(self):
+        from api.services.pipeline import _save_project_integrations
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with patch("api.services.pipeline.DEFAULT_OUTPUT_DIR", Path(tmp_dir)):
+                _save_project_integrations("Legacy Project", None)
+
+                saved_path = Path(tmp_dir) / "Legacy Project_integrations.json"
+                saved = json.loads(saved_path.read_text(encoding="utf-8"))
+
+                self.assertEqual(saved, {
+                    "google_calendar": True,
+                    "gmail": True,
+                    "telegram": True,
+                    "gantt": True,
+                })
 
 class TestResolveProjectName(BaseDashboardTestCase):
     """Tests for resolve_project_name() resolution logic."""
@@ -231,6 +271,17 @@ class TestProjectResultsEndpoint(BaseDashboardTestCase):
         ])
         parts_df.to_excel(self.test_output_dir / f"{pname}_Participants.xlsx", index=False)
 
+        # 8. Saved integration settings
+        saved_integrations = {
+            "google_calendar": False,
+            "gmail": False,
+            "telegram": True,
+            "gantt": False,
+        }
+        (self.test_output_dir / f"{pname}_integrations.json").write_text(
+            json.dumps(saved_integrations), encoding="utf-8"
+        )
+
         # Fetch results
         response = self.client.get(f"/api/project-results/{pname}")
         self.assertEqual(response.status_code, 200)
@@ -268,6 +319,23 @@ class TestProjectResultsEndpoint(BaseDashboardTestCase):
         self.assertEqual(summary["Declined"], 1)
         self.assertEqual(summary["Tentative"], 1)
         self.assertEqual(summary["Awaiting"], 2)  # needsAction + None
+
+    def test_project_results_legacy_project_defaults_integrations(self):
+        """Projects without saved integration settings default to all enabled."""
+        pname = "Legacy Project"
+        (self.test_output_dir / f"{pname}_PRD.json").write_text(
+            json.dumps({"project_name": pname}), encoding="utf-8"
+        )
+
+        response = self.client.get(f"/api/project-results/{pname}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["integrations"], {
+            "google_calendar": True,
+            "gmail": True,
+            "telegram": True,
+            "gantt": True,
+        })
 
     def test_project_results_nan_sanitization(self):
         """Spreadsheet cells with NaN / Inf must be sanitized to None in JSON response."""

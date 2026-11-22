@@ -132,6 +132,21 @@ export default function GanttPage({ projectCtx }) {
     }
 
     const schedule = data?.schedule || []
+    if (data?.integrations?.gantt === false) {
+        return (
+            <div className="page-container">
+                <div className="page-header animate-fade-in-up">
+                    <p className="page-subtitle">Gantt Chart</p>
+                    <h1 className="page-title gradient-text">{data.project_name}</h1>
+                </div>
+                <div className="glass-card dash-card text-center py-16">
+                    <p className="text-surface-500 text-sm font-semibold">
+                        Gantt chart is disabled for this project. Enable Gantt in Setup to display it.
+                    </p>
+                </div>
+            </div>
+        )
+    }
     if (!schedule.length) {
         return (
             <div className="page-container">

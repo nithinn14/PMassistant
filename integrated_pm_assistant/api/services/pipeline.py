@@ -41,6 +41,24 @@ MAX_RETRIES = 5
 # ─────────────────────────────────────────────────────────────────────────────
 # Internal helpers
 # ─────────────────────────────────────────────────────────────────────────────
+def _save_project_integrations(project_name: str, integrations: Optional[dict]) -> None:
+    """Persist the integration choices for a project."""
+    settings = {
+        "google_calendar": True,
+        "gmail": True,
+        "telegram": True,
+        "gantt": True,
+    }
+
+    if isinstance(integrations, dict):
+        settings.update({
+            key: integrations.get(key, True)
+            for key in settings
+        })
+
+    settings_path = DEFAULT_OUTPUT_DIR / f"{project_name}_integrations.json"
+    with open(settings_path, "w", encoding="utf-8") as f:
+        json.dump(settings, f, indent=4)
 
 def _coerce_project_name_to_str(value) -> str:
     """Ensure a value read from a PRD JSON 'product_name'/'project_name' field
@@ -411,6 +429,7 @@ def _run_pipeline(
                 verification = verify_pipeline_output(actual_project_name, DEFAULT_OUTPUT_DIR, job)
 
                 if verification["status"] == "completed":
+                    _save_project_integrations(actual_project_name, integrations)
                     job["status"] = "completed"
                     job["current_step"] = "Done"
                     if "Done" not in job["completed_steps"]:
@@ -421,6 +440,7 @@ def _run_pipeline(
                     return
 
                 elif verification["status"] == "resource_blocked":
+                    _save_project_integrations(actual_project_name, integrations)
                     job["status"] = "resource_blocked"
                     job["current_step"] = verification["current_step"]
                     if verification["current_step"] not in job["completed_steps"]:
