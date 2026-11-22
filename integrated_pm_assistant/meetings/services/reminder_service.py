@@ -54,29 +54,53 @@ class ReminderService:
                 continue
 
             if role in ["R", "A"]:
-                self._email_notifier.send_reschedule_proposal_request(email, project_name)
-                
-                # ── Telegram Escalation (if available) ───────────────────────
+                notification_sent = False
+
+                if self._email_notifier:
+                    try:
+                        email_ok = self._email_notifier.send_reschedule_proposal_request(
+                            email, project_name
+                        )
+                        if email_ok is True:
+                            notification_sent = True
+                    except Exception as me:
+                        print(f"⚠️ Email proposal request failed for {email}: {me}")
+
                 if self._telegram_notifier:
                     try:
-                        employees_df = pd.read_excel(self._output_dir.parent / "employees.xlsx")
-                        emp_row = employees_df[employees_df["Email"].str.strip().str.lower() == email.lower()]
+                        employees_df = pd.read_excel(
+                            self._output_dir.parent / "employees.xlsx"
+                        )
+                        emp_row = employees_df[
+                            employees_df["Email"].str.strip().str.lower() == email.lower()
+                        ]
+
                         if not emp_row.empty:
-                            chat_id = str(emp_row.iloc[0].get("telegram_chat_id", "")).strip()
-                            if chat_id.endswith(".0"): chat_id = chat_id[:-2]
-                            emp_name = str(emp_row.iloc[0].get("Employee_Name", "")).strip()
-                            
+                            chat_id = str(
+                                emp_row.iloc[0].get("telegram_chat_id", "")
+                            ).strip()
+                            if chat_id.endswith(".0"):
+                                chat_id = chat_id[:-2]
+
+                            emp_name = str(
+                                emp_row.iloc[0].get("Employee_Name", "")
+                            ).strip()
+
                             if chat_id and chat_id.lower() not in ("", "nan", "none"):
-                                self._telegram_notifier.send_reschedule_proposal_request(
+                                tg_ok = self._telegram_notifier.send_reschedule_proposal_request(
                                     chat_id=chat_id,
                                     project_name=project_name,
-                                    employee_name=emp_name
+                                    employee_name=emp_name,
                                 )
+                                if tg_ok is True:
+                                    notification_sent = True
+
                     except Exception as te:
                         print(f"⚠️ Telegram escalation failed for {email}: {te}")
-                
-                participants_df.at[idx, "Template_Sent"] = "YES"
-                escalated.append(email)
+
+                if notification_sent:
+                    participants_df.at[idx, "Template_Sent"] = "YES"
+                    escalated.append(email)
 
         if escalated:
             participants_df.to_excel(participant_file, index=False)

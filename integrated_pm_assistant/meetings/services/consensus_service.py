@@ -31,25 +31,32 @@ class ConsensusService:
             email = row["Email"]
             name = row["Employee"]
             
-            # 1. Send Email
-            self._email_notifier.send_consensus_confirmation_request(
-                to_email=email,
-                project_name=project_name,
-                proposer_name=proposer_name,
-                proposed_time=proposed_time
-            )
-
-            # 2. Send Telegram (if available)
-            if self._telegram_notifier:
-                chat_id = self._lookup_chat_id(email)
-                if chat_id:
-                    self._telegram_notifier.send_consensus_confirmation_request(
-                        chat_id=chat_id,
-                        employee_name=name,
+            # 1. Send Email (if available)
+            if self._email_notifier:
+                try:
+                    self._email_notifier.send_consensus_confirmation_request(
+                        to_email=email,
                         project_name=project_name,
                         proposer_name=proposer_name,
                         proposed_time=proposed_time
                     )
+                except Exception as me:
+                    print(f"⚠️ Email consensus confirmation failed for {email}: {me}")
+
+            # 2. Send Telegram (if available)
+            if self._telegram_notifier:
+                try:
+                    chat_id = self._lookup_chat_id(email)
+                    if chat_id:
+                        self._telegram_notifier.send_consensus_confirmation_request(
+                            chat_id=chat_id,
+                            employee_name=name,
+                            project_name=project_name,
+                            proposer_name=proposer_name,
+                            proposed_time=proposed_time
+                        )
+                except Exception as te:
+                    print(f"⚠️ Telegram consensus confirmation failed for {email}: {te}")
 
     def check_consensus(self, project_name: str, event_id: str) -> bool:
         """

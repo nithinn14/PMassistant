@@ -9,7 +9,7 @@ from agents.scheduler_agent import build_scheduler_agent
 from agents.communication import build_communication_agent
 
 
-def build_orchestrator():
+def build_orchestrator(integrations=None):
     """
     ADK-native orchestrator with interruptible resource resolution.
 
@@ -25,6 +25,13 @@ def build_orchestrator():
         ├── SchedulerAgent          → Creates schedule + Gantt chart
         └── CommunicationAgent      → Manages meetings + notifications
     """
+    default_integrations = {
+        "google_calendar": True,
+        "gmail": True,
+        "telegram": True,
+        "gantt": True,
+    }
+    integrations = {**default_integrations, **(integrations or {})}
 
     return SequentialAgent(
         name="PM_Orchestrator",
@@ -51,16 +58,16 @@ Executes full project lifecycle with resource shortage detection:
                 max_iterations=10,
                 sub_agents=[
                     build_resource_agent(),
-                    build_resource_validation_agent(),
+                    build_resource_validation_agent(integrations=integrations),
                 ],
             ),
-            build_scheduler_agent(),
+            build_scheduler_agent(integrations=integrations),
             DeterministicAgent(
                 name="Signal_Communication",
                 description="Signals communication start",
                 logic=lambda x: (print("Starting Communication and Meeting Creation..."), x)[1]
             ),
-            build_communication_agent(),
+            build_communication_agent(integrations=integrations),
             DeterministicAgent(
                 name="Final_Signal",
                 description="Signals pipeline completion",

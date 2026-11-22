@@ -469,7 +469,7 @@ class TestLiveUvicornServer(unittest.TestCase):
         pipeline1_done = threading.Event()
         pipeline2_done = threading.Event()
 
-        def mock_pipeline(job_id, project_name, project_description, backend_choice):
+        def mock_pipeline(job_id, project_name, project_description, backend_choice, integrations=None):
             capture = api_server.OutputCapture(job_id)
             api_server.jobs[job_id]["_capture"] = capture
             token = api_server._current_job_id_var.set(job_id)

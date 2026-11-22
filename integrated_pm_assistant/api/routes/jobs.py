@@ -28,10 +28,11 @@ def ping():
 @router.post("/api/start-project")
 def start_project(req: Optional[StartProjectRequest] = None):
     """Launch the ADK project management pipeline in a background thread."""
-    req_dict = req.model_dump() if req else {}
+    req_dict = (req or StartProjectRequest()).model_dump()
     project_name = (req_dict.get("project_name") or "").strip()
     project_description = (req_dict.get("project_description") or "").strip()
     backend_choice = (req_dict.get("data_backend") or "excel").strip().lower()
+    integrations = req_dict["integrations"]
 
     if not project_name or not project_description:
         return _safe_jsonify({"error": "project_name and project_description are required"}, status=400)
@@ -56,7 +57,7 @@ def start_project(req: Optional[StartProjectRequest] = None):
     }
 
     thread = threading.Thread(
-        target=_run_pipeline, args=(job_id, project_name, project_description, backend_choice)
+        target=_run_pipeline, args=(job_id, project_name, project_description, backend_choice, integrations)
     )
     thread.daemon = True
     thread.start()

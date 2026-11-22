@@ -255,7 +255,13 @@ def verify_pipeline_output(
     }
 
 
-def _run_pipeline(job_id: str, project_name: str, project_description: str, backend_choice: str = "excel"):
+def _run_pipeline(
+    job_id: str,
+    project_name: str,
+    project_description: str,
+    backend_choice: str = "excel",
+    integrations: Optional[dict] = None,
+):
     """Runs the ADK orchestrator in a background thread with automatic retry on 429."""
     job = jobs[job_id]
 
@@ -345,7 +351,7 @@ def _run_pipeline(job_id: str, project_name: str, project_description: str, back
             print(f"DEBUG: Attempt {attempt}/{MAX_RETRIES} — model: {model_name}")
 
             # Rebuild everything fresh on each attempt
-            agent = build_orchestrator()
+            agent = build_orchestrator(integrations=integrations)
             session_service = InMemorySessionService()
             runner = Runner(
                 app_name="pm_assistant_app",

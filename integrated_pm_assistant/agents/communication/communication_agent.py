@@ -24,6 +24,7 @@ import json
 import pandas as pd
 
 from google.adk.agents import SequentialAgent, LlmAgent
+from google.adk.tools.function_tool import FunctionTool
 
 from agents.deterministic_agent import DeterministicAgent
 from config_loader import load_config
@@ -31,8 +32,8 @@ from data_backend import get_backend
 from meetings.tools.meeting_tools import (
     create_meeting_tool,
     check_rsvp_tool,
-    send_reminder_tool,
-    reschedule_meeting_tool,
+    send_reminder,
+    reschedule_meeting,
 )
 
 
@@ -40,7 +41,7 @@ from meetings.tools.meeting_tools import (
 # Sub-agent 1: Deterministic meeting creator
 # ---------------------------------------------------------------------------
 
-def _meeting_creator_logic(input_text: str) -> str:
+def _meeting_creator_logic(input_text: str, integrations=None) -> str:
     """
     Read the scheduled data and create the Kickoff meeting.
     This is deterministic — no LLM needed.
@@ -69,13 +70,20 @@ def _meeting_creator_logic(input_text: str) -> str:
         return json.dumps({"error": f"Cannot read scheduled data: {e}"})
 
     # Create Kickoff meeting (deterministic — always needed for new projects)
-    from meetings.tools.meeting_tools import create_meeting
-    result = create_meeting(project_name=project_name, meeting_type="Kickoff")
-
+    if (integrations or {}).get("google_calendar", True):
+        from meetings.tools.meeting_tools import create_meeting
+        result = create_meeting(
+            project_name=project_name,
+            meeting_type="Kickoff",
+            integrations=integrations,
+        )
+        kickoff_result = json.loads(result)
+    else:
+        kickoff_result = {"status": "skipped", "reason": "Google Calendar disabled"}
     # Pass project info downstream to the LlmAgent for lifecycle management
     return json.dumps({
         "project_name": project_name,
-        "kickoff_result": json.loads(result),
+        "kickoff_result": kickoff_result,
         "meeting_types": ["Kickoff", "Mid-Project Review", "Final Review"],
     })
 
@@ -113,7 +121,7 @@ IMPORTANT:
 # Build the hybrid agent
 # ---------------------------------------------------------------------------
 
-def build_communication_agent():
+def build_communication_agent(integrations=None):
     """
     Build the hybrid CommunicationAgent as an ADK SequentialAgent.
 
@@ -121,22 +129,39 @@ def build_communication_agent():
       1. DeterministicAgent creates the Kickoff meeting
       2. LlmAgent uses tools to manage RSVP/reminders/rescheduling
     """
+    integrations = integrations if integrations is not None else {
+        "google_calendar": True,
+        "gmail": True,
+        "telegram": True,
+        "gantt": True,
+    }
+
     config = load_config()
     model_name = config["models"]["default"]
 
     meeting_creator = DeterministicAgent(
         name="meeting_creator",
         description="Creates Kickoff meeting from scheduled data (deterministic)",
-        logic=_meeting_creator_logic,
+        logic=lambda input_text: _meeting_creator_logic(input_text, integrations=integrations),
     )
 
-    meeting_sync = LlmAgent(
-        name="meeting_sync_agent",
-        description="Manages meeting lifecycle: checks RSVP, sends reminders, reschedules",
-        model=model_name,
-        instruction=MEETING_SYNC_INSTRUCTION,
-        tools=[check_rsvp_tool, send_reminder_tool, reschedule_meeting_tool],
-    )
+    if integrations.get("google_calendar", True):
+        def _scoped_send_reminder(project_name: str, meeting_type: str) -> str:
+            return send_reminder(project_name=project_name, meeting_type=meeting_type, integrations=integrations)
+
+        def _scoped_reschedule_meeting(project_name: str, meeting_type: str) -> str:
+            return reschedule_meeting(project_name=project_name, meeting_type=meeting_type, integrations=integrations)
+
+        scoped_send_reminder_tool = FunctionTool(_scoped_send_reminder)
+        scoped_reschedule_meeting_tool = FunctionTool(_scoped_reschedule_meeting)
+
+        meeting_sync = LlmAgent(
+            name="meeting_sync_agent",
+            description="Manages meeting lifecycle: checks RSVP, sends reminders, reschedules",
+            model=model_name,
+            instruction=MEETING_SYNC_INSTRUCTION,
+            tools=[check_rsvp_tool, scoped_send_reminder_tool, scoped_reschedule_meeting_tool],
+        )
 
     return SequentialAgent(
         name="communication_agent",
@@ -144,5 +169,9 @@ def build_communication_agent():
             "Hybrid communication agent: deterministic meeting creation "
             "followed by LLM-powered RSVP, reminders, and rescheduling."
         ),
-        sub_agents=[meeting_creator, meeting_sync],
+        sub_agents=(
+            [meeting_creator, meeting_sync]
+            if integrations.get("google_calendar", True)
+            else [meeting_creator]
+        ),
     )

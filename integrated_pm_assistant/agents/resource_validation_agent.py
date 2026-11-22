@@ -17,6 +17,7 @@ import os
 import re
 from pathlib import Path
 from typing import AsyncGenerator, Optional
+from pydantic import Field
 
 import pandas as pd
 from google.adk.agents.base_agent import BaseAgent
@@ -108,6 +109,13 @@ class ResourceValidationAgent(BaseAgent):
                         ResourceAgent, which does incremental assignment only)
     """
 
+    integrations: dict = Field(default_factory=lambda: {
+        "google_calendar": True,
+        "gmail": True,
+        "telegram": True,
+        "gantt": True,
+    })
+
     async def _run_async_impl(
         self, ctx: InvocationContext
     ) -> AsyncGenerator[Event, None]:
@@ -140,7 +148,7 @@ class ResourceValidationAgent(BaseAgent):
 
         pm_email = _get_pm_email()
         notification_issues = []
-        if not is_valid_email(pm_email):
+        if self.integrations.get("gmail", True) and not is_valid_email(pm_email):
             notification_issues.append({
                 "recipient": "Project Manager",
                 "role": "Project Manager",
@@ -170,7 +178,7 @@ class ResourceValidationAgent(BaseAgent):
         )
 
         # Send Email + Telegram alert (with bot command hints)
-        notifier = build_notification_agent(load_config())
+        notifier = build_notification_agent(load_config(), integrations=self.integrations)
         notifier.notify_resource_shortage(
             pm_email=pm_email,
             project_name=project_name,
@@ -200,10 +208,12 @@ class ResourceValidationAgent(BaseAgent):
         # Start the Telegram bot as a background asyncio task so the PM can
         # respond with commands without needing a separate terminal.
         # The task is cancelled before we yield any event back to the ADK.
-        bot_task = asyncio.create_task(
-            run_telegram_listener(project_name),
-            name=f"telegram_bot_{project_name}",
-        )
+        bot_task = None
+        if self.integrations.get("telegram", True):
+            bot_task = asyncio.create_task(
+                run_telegram_listener(project_name),
+                name=f"telegram_bot_{project_name}",
+            )
 
         # These will be set inside the loop to decide what to yield
         should_escalate = False
@@ -268,7 +278,7 @@ class ResourceValidationAgent(BaseAgent):
             last_employees_mtime = current_mtime
 
         # Cancel the Telegram bot BEFORE yielding (avoids async generator crash)
-        if not bot_task.done():
+        if bot_task is not None and not bot_task.done():
             bot_task.cancel()
             try:
                 await bot_task
@@ -303,7 +313,7 @@ class ResourceValidationAgent(BaseAgent):
 # Factory
 # ---------------------------------------------------------------------------
 
-def build_resource_validation_agent():
+def build_resource_validation_agent(integrations=None):
     return ResourceValidationAgent(
         name="resource_validation_agent",
         description=(
@@ -311,4 +321,10 @@ def build_resource_validation_agent():
             "On shortage: notifies PM and watches for resolution "
             "(workflow_state.yaml or employees.xlsx change)."
         ),
+        integrations=integrations if integrations is not None else {
+            "google_calendar": True,
+            "gmail": True,
+            "telegram": True,
+            "gantt": True,
+        },
     )

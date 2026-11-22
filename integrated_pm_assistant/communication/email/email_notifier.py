@@ -104,12 +104,12 @@ class EmailNotifier:
         )
         print(f"📧 Telegram registration invite sent → {to_email}")
 
-    def send_reschedule_proposal_request(self, to_email: str, project_name: str) -> None:
+    def send_reschedule_proposal_request(self, to_email: str, project_name: str) -> bool:
         """
         Send a structured reschedule proposal template to a declined participant.
         Asks them to reply with their reason and a proposed alternative time.
         """
-        self.send(
+        return self.send(
             to_email=to_email,
             subject=f"Action Required: Please Propose a New Meeting Time | {project_name}",
             message=(

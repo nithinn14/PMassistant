@@ -72,7 +72,7 @@ export default function SetupPage({ setProjectCtx }) {
             if (selectedFile) {
                 await uploadFile(selectedFile)
             }
-            const res = await startProject(form)
+            const res = await startProject({ ...form, integrations: checks })
             setProjectCtx({ jobId: res.job_id, projectName: form.project_name })
             navigate('/processing')
         } catch (err) {

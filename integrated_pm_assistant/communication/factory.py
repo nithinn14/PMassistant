@@ -63,12 +63,19 @@ def build_registration_handler(config: dict) -> TelegramRegistrationHandler:
     )
 
 
-def build_notification_agent(config: dict):
+def build_notification_agent(config: dict, integrations=None):
     from agents.communication.notification_agent import NotificationAgent
 
+    integrations = integrations or {}
+    telegram_enabled = (
+        integrations.get("telegram", True)
+        and config.get("telegram", {}).get("enabled", False)
+    )
+    gmail_enabled = integrations.get("gmail", True)
+
     return NotificationAgent(
-        email_notifier=build_email_notifier(config),
-        telegram_notifier=build_telegram_notifier(config),
+        email_notifier=build_email_notifier(config) if gmail_enabled else None,
+        telegram_notifier=build_telegram_notifier(config) if telegram_enabled else None,
     )
 
 

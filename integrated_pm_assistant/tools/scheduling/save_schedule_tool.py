@@ -40,7 +40,7 @@ def add_working_days(start_date, days):
     return current
 
 
-def save_schedule(input_json: str) -> str:
+def save_schedule(input_json: str, integrations=None) -> str:
     data = _parse_json(input_json)
 
     project_name = data["project_name"]
@@ -131,7 +131,7 @@ def save_schedule(input_json: str) -> str:
         from communication.telegram.telegram_notifier import TelegramNotifier
 
         tg_cfg = config.get("telegram", {})
-        if tg_cfg.get("enabled", False):
+        if (integrations or {}).get("telegram", True) and tg_cfg.get("enabled", False):
             bot_token = os.environ.get(tg_cfg.get("bot_token_env", "TELEGRAM_BOT_TOKEN"), "")
             if bot_token:
                 tg = TelegramNotifier(bot_token=bot_token)
@@ -176,36 +176,41 @@ def save_schedule(input_json: str) -> str:
         print(f"⚠️ Telegram task-assignment DMs skipped: {tg_err}")
 
     # ── Email task-assignment notifications ────────────────────────────────────
-    try:
-        from communication.factory import build_email_notifier
+    if (integrations or {}).get("gmail", True):
+        try:
+            from communication.factory import build_email_notifier
 
-        email_notifier = build_email_notifier(config)
+            email_notifier = build_email_notifier(config)
 
-        for emp_name, emp_tasks in df.groupby("assigned_empl"):
-            emp_name_str = str(emp_name).strip()
-            emp_email = str(emp_tasks.iloc[0].get("assigned_email", "")).strip()
-            if not emp_email or emp_email.lower() in ("", "nan", "none"):
-                continue
+            for emp_name, emp_tasks in df.groupby("assigned_empl"):
+                emp_name_str = str(emp_name).strip()
+                emp_email = str(emp_tasks.iloc[0].get("assigned_email", "")).strip()
+                if not emp_email or emp_email.lower() in ("", "nan", "none"):
+                    continue
 
-            task_lines = []
-            for _, row in emp_tasks.iterrows():
-                t_name = row.get("task_name", row.get("task", "Task"))
-                t_start = row.get("start_date", "")
-                t_end = row.get("end_date", "")
-                task_lines.append(f"  - {str(t_name)} ({t_start} to {t_end})")
+                task_lines = []
+                for _, row in emp_tasks.iterrows():
+                    t_name = row.get("task_name", row.get("task", "Task"))
+                    t_start = row.get("start_date", "")
+                    t_end = row.get("end_date", "")
+                    task_lines.append(f"  - {str(t_name)} ({t_start} to {t_end})")
 
-            subject = f"Task Assignment: {project_name}"
-            body = (
-                f"Hello {emp_name_str},\n\n"
-                f"You have been assigned to {project_name}.\n\n"
-                f"Your Tasks:\n" + "\n".join(task_lines) + "\n\n"
-                f"Please check with your Project Manager for further details."
-            )
-            success = email_notifier.send(to_email=emp_email, subject=subject, message=body)
-            if success:
-                email_sent.add(emp_name_str)
-    except Exception as email_err:
-        print(f"⚠️ Task-assignment emails skipped: {email_err}")
+                subject = f"Task Assignment: {project_name}"
+                body = (
+                    f"Hello {emp_name_str},\n\n"
+                    f"You have been assigned to {project_name}.\n\n"
+                    f"Your Tasks:\n" + "\n".join(task_lines) + "\n\n"
+                    f"Please check with your Project Manager for further details."
+                )
+                success = email_notifier.send(
+                    to_email=emp_email,
+                    subject=subject,
+                    message=body,
+                )
+                if success:
+                    email_sent.add(emp_name_str)
+        except Exception as email_err:
+            print(f"⚠️ Task-assignment emails skipped: {email_err}")
 
     # ── Write notification delivery status ──────────────────────────────────
     try:

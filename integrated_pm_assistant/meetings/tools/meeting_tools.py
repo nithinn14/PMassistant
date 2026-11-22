@@ -47,7 +47,7 @@ def _token_path() -> Path:
 # Tool 1: Create Meeting
 # ---------------------------------------------------------------------------
 
-def create_meeting(project_name: str, meeting_type: str) -> str:
+def create_meeting(project_name: str, meeting_type: str, integrations=None) -> str:
     """
     Create a Google Calendar meeting for the given project.
 
@@ -67,6 +67,7 @@ def create_meeting(project_name: str, meeting_type: str) -> str:
         task_excel_path=excel_path,
         project_name=project_name,
         meeting_type=meeting_type,
+        integrations=integrations,
     )
     return json.dumps(result, default=str)
 
@@ -113,26 +114,39 @@ def check_rsvp(project_name: str, meeting_type: str) -> str:
     return json.dumps(result, default=str)
 
 
-def _build_notifiers():
+def _build_notifiers(integrations=None):
     config = load_config()
-    smtp = config["smtp"]
-    from communication.email.email_notifier import EmailNotifier
-    email_notifier = EmailNotifier(
-        sender_email=os.environ[smtp["email_env"]],
-        sender_password=os.environ[smtp["password_env"]],
-        smtp_host=smtp["host"],
-        smtp_port=smtp["port"],
-    )
+    integrations = integrations or {}
 
+    email_notifier = None
     telegram_notifier = None
+
+    if integrations.get("gmail", True):
+        smtp = config["smtp"]
+        from communication.email.email_notifier import EmailNotifier
+
+        email_notifier = EmailNotifier(
+            sender_email=os.environ[smtp["email_env"]],
+            sender_password=os.environ[smtp["password_env"]],
+            smtp_host=smtp["host"],
+            smtp_port=smtp["port"],
+        )
     tg_cfg = config.get("telegram", {})
-    if tg_cfg.get("enabled", False):
-        bot_token = os.environ.get(tg_cfg.get("bot_token_env", "TELEGRAM_BOT_TOKEN"), "")
-        pm_chat_id = os.environ.get(tg_cfg.get("chat_id_env", "TELEGRAM_CHAT_ID"), "")
+    if integrations.get("telegram", True) and tg_cfg.get("enabled", False):
+        bot_token = os.environ.get(
+            tg_cfg.get("bot_token_env", "TELEGRAM_BOT_TOKEN"), ""
+        )
+        pm_chat_id = os.environ.get(
+            tg_cfg.get("chat_id_env", "TELEGRAM_CHAT_ID"), ""
+        )
+
         if bot_token:
             from communication.telegram.telegram_notifier import TelegramNotifier
-            telegram_notifier = TelegramNotifier(bot_token=bot_token, pm_chat_id=pm_chat_id)
-    
+            telegram_notifier = TelegramNotifier(
+                bot_token=bot_token,
+                pm_chat_id=pm_chat_id,
+            )
+
     return email_notifier, telegram_notifier
 
 
@@ -140,7 +154,7 @@ def _build_notifiers():
 # Tool 3: Send Reminders
 # ---------------------------------------------------------------------------
 
-def send_reminder(project_name: str, meeting_type: str) -> str:
+def send_reminder(project_name: str, meeting_type: str, integrations=None) -> str:
     """
     Send escalation reminder emails to participants who declined a meeting
     without proposing an alternative time. Only R/A role participants
@@ -149,7 +163,7 @@ def send_reminder(project_name: str, meeting_type: str) -> str:
     from meetings.services.reminder_service import ReminderService
 
     output_dir = _output_dir()
-    email_notifier, telegram_notifier = _build_notifiers()
+    email_notifier, telegram_notifier = _build_notifiers(integrations)
 
     service = ReminderService(
         output_dir=output_dir, 
@@ -164,7 +178,7 @@ def send_reminder(project_name: str, meeting_type: str) -> str:
 # Tool 4: Reschedule Meeting
 # ---------------------------------------------------------------------------
 
-def reschedule_meeting(project_name: str, meeting_type: str) -> str:
+def reschedule_meeting(project_name: str, meeting_type: str, integrations=None) -> str:
     """
     Check if a valid reschedule proposal exists (from Calendar or Gmail)
     and manage the semi-automated consensus gathering process.
@@ -175,7 +189,7 @@ def reschedule_meeting(project_name: str, meeting_type: str) -> str:
     output_dir = _output_dir()
     token = _token_path()
     
-    email_notifier, telegram_notifier = _build_notifiers()
+    email_notifier, telegram_notifier = _build_notifiers(integrations)
     consensus_svc = ConsensusService(
         output_dir=output_dir,
         email_notifier=email_notifier,

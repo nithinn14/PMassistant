@@ -78,7 +78,19 @@ def create_calendar_event(summary, description, start_time, end_time, attendees)
     }
 
 
-def notify_project_level_meetings(task_excel_path: str, project_name: str, meeting_type: str):
+def notify_project_level_meetings(
+    task_excel_path: str,
+    project_name: str,
+    meeting_type: str,
+    integrations=None,
+):
+
+    integrations = {
+        "gmail": True,
+        "telegram": True,
+        **(integrations or {}),
+    }
+
     df = pd.read_excel(task_excel_path)
     df.columns = df.columns.str.strip()
 
@@ -180,96 +192,98 @@ def notify_project_level_meetings(task_excel_path: str, project_name: str, meeti
     print(f"✅ {meeting_type} meeting created successfully")
     
     # ── Meeting email with join link (in addition to the Google Calendar invite) ──
-    try:
-        from config_loader import load_config
-        from communication.factory import build_email_notifier
+    if integrations.get("gmail", True):
+        try:
+            from config_loader import load_config
+            from communication.factory import build_email_notifier
 
-        mailer = build_email_notifier(load_config())
-        meet_link = meeting.get("meet_link")
-        when_date = meeting_time.strftime("%A, %d %B %Y")
-        when_time = f"{meeting_time.strftime('%H:%M')} - {meeting_end.strftime('%H:%M')} IST"
+            mailer = build_email_notifier(load_config())
+            meet_link = meeting.get("meet_link")
+            when_date = meeting_time.strftime("%A, %d %B %Y")
+            when_time = f"{meeting_time.strftime('%H:%M')} - {meeting_end.strftime('%H:%M')} IST"
 
-        meeting_mail_sent, meeting_mail_failed = [], []
-        for email in participants:
-            person_rows = df[df["assigned_email"] == email]
-            person = str(person_rows.iloc[0].get("assigned_empl", "")).strip() if not person_rows.empty else ""
-            greeting = f"Hello {person}," if person and person.lower() != "nan" else "Hello,"
-            link_line = (
-                f"Join here: {meet_link}"
-                if meet_link
-                else "The join link is in the Google Calendar invite."
-            )
-            body = (
-                f"{greeting}\n\n"
-                f"A {meeting_type} meeting has been scheduled for the project {project_name}.\n\n"
-                f"Date: {when_date}\n"
-                f"Time: {when_time}\n"
-                f"{link_line}\n\n"
-                f"You will also receive a Google Calendar invite. Please respond to that invite "
-                f"(Yes / No / Maybe) so your RSVP is recorded.\n\n"
-                f"- PM Assistant"
-            )
-            ok = mailer.send(
-                to_email=str(email).strip(),
-                subject=f"{meeting_type} Meeting: {project_name}",
-                message=body,
-            )
-            (meeting_mail_sent if ok else meeting_mail_failed).append(str(email))
-        print(f"📧 Meeting emails: {len(meeting_mail_sent)} sent, {len(meeting_mail_failed)} failed")
-    except Exception as mail_err:
-        print(f"⚠️ Meeting emails skipped: {mail_err}")
+            meeting_mail_sent, meeting_mail_failed = [], []
+            for email in participants:
+                person_rows = df[df["assigned_email"] == email]
+                person = str(person_rows.iloc[0].get("assigned_empl", "")).strip() if not person_rows.empty else ""
+                greeting = f"Hello {person}," if person and person.lower() != "nan" else "Hello,"
+                link_line = (
+                    f"Join here: {meet_link}"
+                    if meet_link
+                    else "The join link is in the Google Calendar invite."
+                )
+                body = (
+                    f"{greeting}\n\n"
+                    f"A {meeting_type} meeting has been scheduled for the project {project_name}.\n\n"
+                    f"Date: {when_date}\n"
+                    f"Time: {when_time}\n"
+                    f"{link_line}\n\n"
+                    f"You will also receive a Google Calendar invite. Please respond to that invite "
+                    f"(Yes / No / Maybe) so your RSVP is recorded.\n\n"
+                    f"- PM Assistant"
+                )
+                ok = mailer.send(
+                    to_email=str(email).strip(),
+                    subject=f"{meeting_type} Meeting: {project_name}",
+                    message=body,
+                )
+                (meeting_mail_sent if ok else meeting_mail_failed).append(str(email))
+            print(f"📧 Meeting emails: {len(meeting_mail_sent)} sent, {len(meeting_mail_failed)} failed")
+        except Exception as mail_err:
+            print(f"⚠️ Meeting emails skipped: {mail_err}")
 
     # ── Telegram notifications ──────────────────────────────────────────────
-    try:
-        from config_loader import load_config
-        from communication.telegram.telegram_notifier import TelegramNotifier
+    if integrations.get("telegram", True):
+        try:
+            from config_loader import load_config
+            from communication.telegram.telegram_notifier import TelegramNotifier
 
-        config = load_config()
-        tg_cfg = config.get("telegram", {})
-        if tg_cfg.get("enabled", False):
-            bot_token = os.environ.get(tg_cfg.get("bot_token_env", "TELEGRAM_BOT_TOKEN"), "")
-            pm_chat_id = os.environ.get(tg_cfg.get("chat_id_env", "TELEGRAM_CHAT_ID"), "")
+            config = load_config()
+            tg_cfg = config.get("telegram", {})
+            if tg_cfg.get("enabled", False):
+                bot_token = os.environ.get(tg_cfg.get("bot_token_env", "TELEGRAM_BOT_TOKEN"), "")
+                pm_chat_id = os.environ.get(tg_cfg.get("chat_id_env", "TELEGRAM_CHAT_ID"), "")
 
-            if bot_token:
-                tg = TelegramNotifier(bot_token=bot_token, pm_chat_id=pm_chat_id)
+                if bot_token:
+                    tg = TelegramNotifier(bot_token=bot_token, pm_chat_id=pm_chat_id)
 
-                # 1. PM-channel alert
-                attendee_list = "\n".join(f"  • {e}" for e in participants)
-                tg.send(
-                    f"📅 *Meeting Scheduled*\n"
-                    f"*Project:* {TelegramNotifier.escape_md(project_name)}\n"
-                    f"*Type:* {TelegramNotifier.escape_md(meeting_type)}\n"
-                    f"*Time:* {TelegramNotifier.escape_md(meeting_time.strftime('%Y-%m-%d %H:%M'))}\n\n"
-                    f"*Attendees:*\n{TelegramNotifier.escape_md(attendee_list)}",
-                    name="PM Alert"
-                )
+                    # 1. PM-channel alert
+                    attendee_list = "\n".join(f"  • {e}" for e in participants)
+                    tg.send(
+                        f"📅 *Meeting Scheduled*\n"
+                        f"*Project:* {TelegramNotifier.escape_md(project_name)}\n"
+                        f"*Type:* {TelegramNotifier.escape_md(meeting_type)}\n"
+                        f"*Time:* {TelegramNotifier.escape_md(meeting_time.strftime('%Y-%m-%d %H:%M'))}\n\n"
+                        f"*Attendees:*\n{TelegramNotifier.escape_md(attendee_list)}",
+                        name="PM Alert"
+                    )
 
-                # 2. Per-employee DMs (if they registered via /start)
-                try:
-                    employees_df = pd.read_excel(BASE_DIR / "employees.xlsx")
-                    if "telegram_chat_id" in employees_df.columns:
-                        for email in participants:
-                            emp_row = employees_df[
-                                employees_df["Email"].astype(str).str.strip().str.lower()
-                                == str(email).strip().lower()
-                            ]
-                            if emp_row.empty:
-                                continue
-                            chat_id = str(emp_row.iloc[0].get("telegram_chat_id", "")).strip()
-                            emp_name = str(emp_row.iloc[0].get("Employee_Name", "")).strip()
-                            if chat_id and chat_id.lower() not in ("", "nan", "none"):
-                                tg.send_meeting_alert(
-                                    chat_id=chat_id,
-                                    employee_name=emp_name,
-                                    project_name=project_name,
-                                    meeting_type=meeting_type,
-                                    meeting_time=meeting_time.strftime("%Y-%m-%d %H:%M"),
-                                )
-                except Exception as tg_emp_err:
-                    print(f"⚠️ Telegram per-employee DM failed: {tg_emp_err}")
-            else:
-                print("⚠️ Telegram bot token not configured — skipping Telegram alerts")
-    except Exception as tg_err:
-        print(f"⚠️ Telegram alert skipped: {tg_err}")
+                    # 2. Per-employee DMs (if they registered via /start)
+                    try:
+                        employees_df = pd.read_excel(BASE_DIR / "employees.xlsx")
+                        if "telegram_chat_id" in employees_df.columns:
+                            for email in participants:
+                                emp_row = employees_df[
+                                    employees_df["Email"].astype(str).str.strip().str.lower()
+                                    == str(email).strip().lower()
+                                ]
+                                if emp_row.empty:
+                                    continue
+                                chat_id = str(emp_row.iloc[0].get("telegram_chat_id", "")).strip()
+                                emp_name = str(emp_row.iloc[0].get("Employee_Name", "")).strip()
+                                if chat_id and chat_id.lower() not in ("", "nan", "none"):
+                                    tg.send_meeting_alert(
+                                        chat_id=chat_id,
+                                        employee_name=emp_name,
+                                        project_name=project_name,
+                                        meeting_type=meeting_type,
+                                        meeting_time=meeting_time.strftime("%Y-%m-%d %H:%M"),
+                                    )
+                    except Exception as tg_emp_err:
+                        print(f"⚠️ Telegram per-employee DM failed: {tg_emp_err}")
+                else:
+                    print("⚠️ Telegram bot token not configured — skipping Telegram alerts")
+        except Exception as tg_err:
+            print(f"⚠️ Telegram alert skipped: {tg_err}")
 
     return {"status": "success"}
