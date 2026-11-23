@@ -579,6 +579,261 @@ class TestExcelCsvConsistency(BaseBackendTestCase):
             os.chdir(orig_cwd)
 
 
+# ==============================================================================
+# F. Concurrency and Atomic Writes (Batch 1, Part A)
+# ==============================================================================
+class TestExcelConcurrencyAndAtomicWrites(BaseBackendTestCase):
+    """Regression tests for Excel storage concurrency, locking, and atomic writes."""
+
+    def test_transaction_lock_serializes_concurrent_threads_separate_instances(self):
+        """Separate ExcelBackend instances across concurrent threads serialize read-modify-write transactions."""
+        import threading
+        import time
+
+        table_name = "concurrent_counter"
+        init_df = pd.DataFrame([{"counter": 0}])
+        self.excel_backend.write(table_name, init_df)
+
+        num_threads = 5
+        increments_per_thread = 2
+        errors = []
+
+        def worker():
+            try:
+                # Each thread uses a separate ExcelBackend instance, matching _run_pipeline
+                backend = ExcelBackend(output_dir="output", root_dir=str(self.test_dir))
+                for _ in range(increments_per_thread):
+                    with backend.transaction(table_name, timeout=10.0):
+                        current_df = backend.read(table_name)
+                        current_val = int(current_df.iloc[0]["counter"])
+                        # Sleep briefly to induce a race window if locks were missing
+                        time.sleep(0.02)
+                        next_df = pd.DataFrame([{"counter": current_val + 1}])
+                        backend.write(table_name, next_df)
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(num_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"Thread worker encountered errors: {errors}")
+        final_df = self.excel_backend.read(table_name)
+        expected_total = num_threads * increments_per_thread
+        self.assertEqual(int(final_df.iloc[0]["counter"]), expected_total)
+
+    def test_lock_released_after_exception(self):
+        """A transaction lock is released cleanly when an exception occurs inside the with block."""
+        table_name = "test_exc_table"
+        init_df = pd.DataFrame([{"status": "initial"}])
+        self.excel_backend.write(table_name, init_df)
+
+        b1 = ExcelBackend(output_dir="output", root_dir=str(self.test_dir))
+        b2 = ExcelBackend(output_dir="output", root_dir=str(self.test_dir))
+
+        with self.assertRaises(RuntimeError):
+            with b1.transaction(table_name, timeout=5.0):
+                raise RuntimeError("Simulated failure inside transaction")
+
+        # b2 must immediately be able to acquire the lock and write
+        with b2.transaction(table_name, timeout=2.0):
+            b2.write(table_name, pd.DataFrame([{"status": "updated_by_b2"}]))
+
+        final_df = b2.read(table_name)
+        self.assertEqual(final_df.iloc[0]["status"], "updated_by_b2")
+
+    def test_thread_lock_released_when_lock_file_open_fails(self):
+        """Thread lock is released if opening the OS lock file fails."""
+        from unittest.mock import patch
+
+        table_name = "test_open_failure"
+        backend = ExcelBackend(output_dir="output", root_dir=str(self.test_dir))
+
+        with patch(
+            "data_backend.excel_backend.os.open",
+            side_effect=PermissionError("Simulated lock-file access failure")
+        ):
+            with self.assertRaises(PermissionError):
+                with backend.transaction(table_name, timeout=2.0):
+                    pass
+
+        # A subsequent transaction must acquire the same thread lock successfully.
+        with backend.transaction(table_name, timeout=2.0):
+            pass
+
+    def test_atomic_write_replaces_destination_and_cleans_temp(self):
+        """Atomic write writes new data via temporary .xlsx file and leaves no temporary files behind."""
+        table_name = "atomic_clean_test"
+        df1 = pd.DataFrame([{"val": "v1"}])
+        self.excel_backend.write(table_name, df1)
+
+        dest_path = self.excel_backend._resolve_path(table_name)
+        self.assertTrue(dest_path.exists())
+
+        # Intercept _atomic_write_excel to verify the temp file has .xlsx extension
+        observed_temp_paths = []
+        real_atomic_write = self.excel_backend._atomic_write_excel
+
+        def spy_atomic_write(path, df, **kwargs):
+            # Record the temp path pattern created
+            temp_path = path.parent / f".tmp_{path.stem}_test{path.suffix}"
+            observed_temp_paths.append(temp_path)
+            return real_atomic_write(path, df, **kwargs)
+
+        self.excel_backend._atomic_write_excel = spy_atomic_write
+        df2 = pd.DataFrame([{"val": "v2"}])
+        self.excel_backend.write(table_name, df2)
+
+        read_df = self.excel_backend.read(table_name)
+        self.assertEqual(read_df.iloc[0]["val"], "v2")
+
+        # Verify extension of generated temp file is .xlsx so pandas can write to it
+        self.assertTrue(observed_temp_paths[0].name.endswith(".xlsx"))
+        self.assertTrue(observed_temp_paths[0].name.startswith(".tmp_"))
+
+        # Verify no .tmp_* files remain in the output directory
+        temp_files = list(dest_path.parent.glob(".tmp_*"))
+        self.assertEqual(temp_files, [])
+
+    def test_cross_process_locking_no_lost_updates(self):
+        """Separate OS processes using independent ExcelBackend instances do not lose updates."""
+        import subprocess
+
+        table_name = "proc_counter"
+        self.excel_backend.write(table_name, pd.DataFrame([{"counter": 0}]))
+
+        worker_code = f"""
+import sys, time
+sys.stdout.reconfigure(encoding="utf-8")
+import pandas as pd
+sys.path.insert(0, {repr(str(BASE_DIR))})
+from data_backend.excel_backend import ExcelBackend
+
+b = ExcelBackend(output_dir="output", root_dir={repr(str(self.test_dir))})
+for _ in range(2):
+    with b.transaction({repr(table_name)}, timeout=20.0):
+        df = b.read({repr(table_name)})
+        val = int(df.iloc[0]["counter"])
+        time.sleep(0.03)
+        b.write({repr(table_name)}, pd.DataFrame([{{'counter': val + 1}}]))
+"""
+        num_procs = 3
+        procs = []
+        try:
+            for _ in range(num_procs):
+                procs.append(
+                    subprocess.Popen(
+                        [sys.executable, "-c", worker_code],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                    )
+                )
+
+            for p in procs:
+                out, err = p.communicate(timeout=25)
+                self.assertEqual(
+                    p.returncode,
+                    0,
+                    f"Worker process failed with code {p.returncode}: "
+                    f"{err.decode('utf-8', errors='replace')}",
+                )
+        finally:
+            for p in procs:
+                if p.poll() is None:
+                    p.kill()
+                p.communicate()
+
+        final_df = self.excel_backend.read(table_name)
+        self.assertEqual(int(final_df.iloc[0]["counter"]), num_procs * 2)
+
+    def test_acquire_file_lock_retries_contention_and_raises_unexpected_errors(self):
+        """_acquire_file_lock retries expected lock contention errors but raises unexpected OS errors immediately."""
+        import errno
+        from unittest.mock import patch
+        from data_backend.excel_backend import _acquire_file_lock
+
+        # 1. Unexpected OS error (e.g. EBADF, EINVAL) -> must raise immediately
+        with patch("data_backend.excel_backend._lock_file_nonblocking", side_effect=OSError(errno.EBADF, "Bad file descriptor")):
+            with self.assertRaises(OSError) as ctx:
+                _acquire_file_lock(fd=999, timeout=2.0)
+            self.assertEqual(ctx.exception.errno, errno.EBADF)
+
+        # 2. Expected lock contention error -> retries and succeeds when lock becomes free
+        call_count = [0]
+        def flaky_lock(fd):
+            call_count[0] += 1
+            if call_count[0] < 3:
+                raise PermissionError(errno.EACCES, "Contention")
+            return None
+
+        with patch("data_backend.excel_backend._lock_file_nonblocking", side_effect=flaky_lock):
+            _acquire_file_lock(fd=999, timeout=2.0, poll_interval=0.01)
+        self.assertGreaterEqual(call_count[0], 3)
+
+    def test_failed_write_preserves_original_destination(self):
+        """A failure during atomic write leaves the original destination file untouched and removes temp file."""
+        from unittest.mock import patch
+
+        table_name = "failure_preserve_test"
+        df_orig = pd.DataFrame([{"val": "original_data"}])
+        self.excel_backend.write(table_name, df_orig)
+
+        dest_path = self.excel_backend._resolve_path(table_name)
+
+        df_bad = pd.DataFrame([{"val": "corrupted_data"}])
+
+        # Simulate a final PermissionError or OSError during os.replace
+        with patch("os.replace", side_effect=PermissionError("Mock Permission Denied")):
+            with self.assertRaises(PermissionError):
+                self.excel_backend.write(table_name, df_bad)
+
+        # Original data must be preserved untouched
+        read_df = self.excel_backend.read(table_name)
+        self.assertEqual(read_df.iloc[0]["val"], "original_data")
+
+        # Temporary files must be cleaned up
+        temp_files = list(dest_path.parent.glob(".tmp_*"))
+        self.assertEqual(temp_files, [])
+
+    def test_transaction_reentrancy_in_same_thread(self):
+        """Nested transaction calls within the same thread do not deadlock or raise."""
+        table_name = "reentrant_test"
+        df = pd.DataFrame([{"v": 100}])
+
+        with self.excel_backend.transaction(table_name):
+            with self.excel_backend.transaction(table_name):
+                # write() itself internally calls transaction(table_name)
+                self.excel_backend.write(table_name, df)
+
+        read_df = self.excel_backend.read(table_name)
+        self.assertEqual(read_df.iloc[0]["v"], 100)
+
+    def test_transient_permission_error_retry_succeeds(self):
+        """Transient PermissionError during atomic write is retried and succeeds within bounded attempts."""
+        from unittest.mock import patch
+
+        table_name = "retry_perm_test"
+        df = pd.DataFrame([{"status": "retry_ok"}])
+
+        real_replace = os.replace
+        call_count = [0]
+
+        def flaky_replace(src, dst):
+            call_count[0] += 1
+            if call_count[0] < 3:
+                raise PermissionError("Transient lock by antivirus")
+            return real_replace(src, dst)
+
+        with patch("os.replace", side_effect=flaky_replace):
+            self.excel_backend.write(table_name, df)
+
+        self.assertGreaterEqual(call_count[0], 3)
+        read_df = self.excel_backend.read(table_name)
+        self.assertEqual(read_df.iloc[0]["status"], "retry_ok")
+
+
 if __name__ == "__main__":
     unittest.main()
 

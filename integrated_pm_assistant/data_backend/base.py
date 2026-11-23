@@ -6,13 +6,29 @@ Tools/agents only depend on this interface, never on a concrete backend.
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from contextlib import contextmanager
+from typing import Any, Dict, Iterator, List, Optional
 
 import pandas as pd
 
 
 class DataBackend(ABC):
     """Uniform data access interface for the PM Assistant."""
+
+    # ------------------------------------------------------------------
+    # Transaction context manager
+    # ------------------------------------------------------------------
+
+    @contextmanager
+    def transaction(self, table_name: str) -> Iterator[None]:
+        """
+        Acquire an exclusive transaction lock on *table_name* across
+        threads and processes for safe read-modify-write operations.
+
+        Default implementation is a no-op context manager for backends
+        that do not require file-based serialization (e.g. ACID databases).
+        """
+        yield
 
     # ------------------------------------------------------------------
     # Core CRUD
