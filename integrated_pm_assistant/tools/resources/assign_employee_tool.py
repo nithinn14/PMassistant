@@ -1,7 +1,8 @@
 """
 assign_employee_tool.py
 -----------------------
-Incremental resource assignment tool.
+Incremental resource assignment tool coordinating with the dedicated
+AllocationTransactionProcessor.
 
 Key behaviours:
   1. PRESERVE existing assignments — reads {project}_Assigned.xlsx on every run
@@ -16,251 +17,78 @@ Key behaviours:
      "waiting_resource" so the ValidationAgent can detect and report it.
   5. DURATION validation — tasks with missing, zero, negative, or non-finite durations
      are marked "waiting_resource" without allocating an employee.
+  6. TRANSACTIONAL DELEGATION — delegates all atomic state modifications, durability,
+     verification, and crash-recovery to AllocationTransactionProcessor.
 """
 
 from typing import List, Dict, Any, Optional
-import math
 import pandas as pd
 from google.adk.tools.function_tool import FunctionTool
 
 from data_backend import get_backend
-from config_loader import load_config
+from tools.resources.allocation_transaction_processor import (
+    AllocationTransactionProcessor,
+    _is_unassigned,
+    _validate_duration,
+    _get_working_hours_per_day,
+    _normalize_id,
+    _find_employee_id_col,
+    _load_existing_assignments,
+    _merge_tasks,
+)
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _is_unassigned(row: pd.Series) -> bool:
-    """Return True if a task row still needs an employee assigned."""
-    emp = str(row.get("Assigned_Employee", "")).strip()
-    status = str(row.get("task_status", "")).strip().lower()
-
-    unassigned_values = {"", "nan", "none", "no resource available"}
-    return emp.lower() in unassigned_values or status == "waiting_resource"
-
-
-def _validate_duration(val: Any) -> Optional[float]:
+def assign_resources(
+    project_name: str,
+    tasks: List[Dict[str, Any]],
+    attempt_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """
-    Validate task duration in days.
-    Returns positive float if valid and finite, else None.
-    Invalid, missing, zero, negative, or non-finite durations return None.
-    """
-    if val is None or (isinstance(val, float) and pd.isna(val)):
-        return None
-    try:
-        f = float(val)
-        if math.isfinite(f) and f > 0:
-            return f
-        return None
-    except (ValueError, TypeError):
-        return None
-
-
-def _load_existing_assignments(backend, project_name: str) -> pd.DataFrame:
-    """
-    Read the previously saved assigned-tasks file, if it exists.
-    Returns an empty DataFrame if this is the first run.
-    """
-    table_name = f"{project_name}_Assigned"
-    if backend.exists(table_name):
-        return backend.read(table_name)
-    return pd.DataFrame()
-
-
-def _merge_tasks(existing_df: pd.DataFrame, incoming_tasks: List[Dict]) -> pd.DataFrame:
-    """
-    Merge incoming task list with the existing assignments DataFrame.
-
-    Rules:
-    • If a task_id already exists in the saved file AND is assigned → keep the
-      saved row (preserves previous assignments).
-    • Otherwise use the incoming row (new task or waiting_resource task).
-    • Preserve any existing assigned tasks not present in incoming_tasks.
-    """
-    incoming_df = pd.DataFrame(incoming_tasks)
-
-    if existing_df.empty or "task_id" not in existing_df.columns:
-        return incoming_df.copy()
-
-    if "task_id" not in incoming_df.columns:
-        return incoming_df.copy()
-
-    # Index existing by task_id for O(1) lookup (preserve task_id column)
-    existing_indexed = existing_df.set_index("task_id", drop=False)
-
-    merged_rows = []
-    seen_tids = set()
-    for _, row in incoming_df.iterrows():
-        tid = row.get("task_id")
-        if pd.notna(tid) and str(tid).strip() and tid in existing_indexed.index:
-            existing_row = existing_indexed.loc[tid]
-            if isinstance(existing_row, pd.DataFrame):
-                existing_row = existing_row.iloc[0]
-            # Keep existing row only if it is already properly assigned
-            if not _is_unassigned(existing_row):
-                row_dict = existing_row.to_dict()
-                row_dict["task_id"] = tid  # restore / ensure task_id is present
-                merged_rows.append(row_dict)
-                seen_tids.add(tid)
-                continue
-        # Otherwise use the incoming (unassigned) row
-        merged_rows.append(row.to_dict())
-        if pd.notna(tid) and str(tid).strip():
-            seen_tids.add(tid)
-
-    # Preserve any assigned tasks from existing_df not present in incoming_tasks
-    for tid, ex_row in existing_indexed.iterrows():
-        if pd.notna(tid) and str(tid).strip() and tid not in seen_tids:
-            if not _is_unassigned(ex_row):
-                row_dict = ex_row.to_dict()
-                row_dict["task_id"] = tid
-                merged_rows.append(row_dict)
-                seen_tids.add(tid)
-
-    return pd.DataFrame(merged_rows)
-
-
-# ---------------------------------------------------------------------------
-# Main tool function
-# ---------------------------------------------------------------------------
-
-def assign_resources(project_name: str, tasks: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """
-    Incrementally assign employees to tasks.
+    Incrementally assign employees to tasks with durable, verified transaction processing.
 
     Args:
         project_name: Used to locate the existing Assigned file and to
                       update employees' Current_Project field.
         tasks:        Full task list from the TaskAgent (or LoopAgent retry).
+        attempt_id:   Unique identifier for this allocation attempt. If omitted,
+                      a unique ID is generated automatically.
 
     Returns:
-        {"project_name": str, "tasks": list, "resource_blocked": bool}
+        {
+            "project_name": str,
+            "attempt_id": str,
+            "tasks": list,
+            "resource_blocked": bool,
+            "allocated_hours": float,
+        }
     """
-    if not tasks:
-        return {"error": "No tasks provided"}
+    processor = AllocationTransactionProcessor(backend=get_backend())
+    return processor.allocate(project_name=project_name, tasks=tasks, attempt_id=attempt_id)
 
-    # ── 1. Validate incoming tasks ──────────────────────────────────────────
-    incoming_df = pd.DataFrame(tasks)
 
-    if "assigned_role" not in incoming_df.columns:
-        return {"error": "Missing assigned_role column"}
+def rollback_allocations(
+    project_name: str,
+    attempt_id: str,
+    backend=None,
+) -> Dict[str, Any]:
+    """
+    Idempotently and crash-safely roll back employee-hour deductions for a specific attempt_id.
 
-    # ── 2. Load and merge with existing assignments ─────────────────────────
-    backend = get_backend()
-    existing_df = _load_existing_assignments(backend, project_name)
-    tasks_df = _merge_tasks(existing_df, tasks)
+    Delegates to AllocationTransactionProcessor, which inspects actual file contents against
+    recorded original and intended states and verifies each write.
+    """
+    processor = AllocationTransactionProcessor(backend=backend or get_backend())
+    return processor.rollback(project_name=project_name, attempt_id=attempt_id)
 
-    # ── 3. Load employees ───────────────────────────────────────────────────
-    employees_df = backend.read("employees")
 
-    required_cols = ["Role", "Free_Hours", "Allocated_Hours", "Employee_Name"]
-    # Support legacy column name "Allocated_Hour" (without trailing 's')
-    if "Allocated_Hours" not in employees_df.columns and "Allocated_Hour" in employees_df.columns:
-        employees_df = employees_df.rename(columns={"Allocated_Hour": "Allocated_Hours"})
-
-    for col in required_cols:
-        if col not in employees_df.columns:
-            return {"error": f"Missing column '{col}' in employees data"}
-
-    employees_df["Free_Hours"] = pd.to_numeric(
-        employees_df["Free_Hours"], errors="coerce"
-    ).fillna(0)
-    employees_df["Allocated_Hours"] = pd.to_numeric(
-        employees_df["Allocated_Hours"], errors="coerce"
-    ).fillna(0)
-
-    if "Current_Project" not in employees_df.columns:
-        employees_df["Current_Project"] = ""
-    else:
-        employees_df["Current_Project"] = employees_df["Current_Project"].astype(object)
-
-    # ── 4. Role mapping ─────────────────────────────────────────────────────
-    config = load_config()
-    ROLE_MAP = config.get("role_map", {})
-
-    # ── 5. Incremental assignment loop ──────────────────────────────────────
-    for i in range(len(tasks_df)):
-        row = tasks_df.iloc[i]
-
-        # Skip rows that already have a valid assignment
-        if not _is_unassigned(row):
-            continue
-
-        raw_time = row.get("time_days") if "time_days" in tasks_df.columns else None
-        valid_days = _validate_duration(raw_time)
-
-        # Do not allow invalid, missing, zero, negative, or non-finite task durations
-        # to silently become zero-hour assignments. Handle them explicitly without allocating an employee.
-        if valid_days is None:
-            tasks_df.at[i, "Assigned_Employee"] = "No Resource Available"
-            tasks_df.at[i, "task_status"] = "waiting_resource"
-            continue
-
-        # 1. Calculate hours_needed = time_days * 8 before filtering eligible employees.
-        hours_needed = valid_days * 8.0
-
-        # Preserve valid numeric float/int duration in tasks_df (preserving fractional days)
-        tasks_df.at[i, "time_days"] = valid_days
-
-        # Resolve role abbreviation → canonical name
-        raw_role = str(row.get("assigned_role", "")).strip()
-        first_role = raw_role.split(",")[0].strip()
-        target_role = ROLE_MAP.get(first_role, first_role)
-
-        # 2. Find eligible candidates — role match AND Free_Hours >= hours_needed
-        candidates = employees_df[
-            (employees_df["Role"].astype(str).str.strip().str.lower() == target_role.strip().lower())
-            & (employees_df["Free_Hours"] >= hours_needed)
-        ]
-
-        if not candidates.empty:
-            # 3. BALANCED SELECTION: pick the employee with the LOWEST
-            # Allocated_Hours to distribute work evenly across the team
-            emp_index = candidates["Allocated_Hours"].idxmin()
-            emp_name = employees_df.loc[emp_index, "Employee_Name"]
-
-            tasks_df.at[i, "Assigned_Employee"] = emp_name
-            tasks_df.at[i, "task_status"] = "assigned"
-
-            # ── Update the employee's running totals ──────────
-            employees_df.at[emp_index, "Allocated_Hours"] += hours_needed
-            employees_df.at[emp_index, "Free_Hours"] -= hours_needed
-
-            # CUMULATIVE: Append project name if not already present
-            old_projects = str(employees_df.at[emp_index, "Current_Project"]).strip()
-            if old_projects and old_projects.lower() != "nan":
-                plist = [p.strip() for p in old_projects.split(",") if p.strip()]
-                if project_name not in plist:
-                    plist.append(project_name)
-                    employees_df.at[emp_index, "Current_Project"] = ", ".join(plist)
-            else:
-                employees_df.at[emp_index, "Current_Project"] = project_name
-
-        else:
-            # No capacity available — mark for PM attention
-            tasks_df.at[i, "Assigned_Employee"] = "No Resource Available"
-            tasks_df.at[i, "task_status"] = "waiting_resource"
-
-    # ── 6. Persist results ──────────────────────────────────────────────────
-    # Sanitize for JSON & Excel: replace NaN with None
-    tasks_df = tasks_df.where(pd.notnull(tasks_df), None)
-
-    # Write the FULL merged dataset back (assigned rows are preserved)
-    backend.write(f"{project_name}_Assigned", tasks_df)
-    backend.write("employees", employees_df)
-    print("Resource assignment complete")
-
-    resource_blocked = any(
-        str(row.get("task_status", "")).strip() == "waiting_resource"
-        for row in tasks_df.to_dict(orient="records")
-    )
-
-    return {
-        "project_name": project_name,
-        "tasks": tasks_df.to_dict(orient="records"),
-        "resource_blocked": resource_blocked,
-    }
+def get_allocation_records(
+    project_name: Optional[str] = None,
+    attempt_id: Optional[str] = None,
+    backend=None,
+) -> pd.DataFrame:
+    """Return allocation records from transaction journal for query compatibility."""
+    processor = AllocationTransactionProcessor(backend=backend or get_backend())
+    return processor.get_allocation_records(project_name=project_name, attempt_id=attempt_id)
 
 
 # Register as an ADK FunctionTool
