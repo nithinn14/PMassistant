@@ -27,6 +27,18 @@ from typing import List, Optional
 
 import yaml
 
+from tools.resources.assign_employee_tool import rollback_allocations
+
+from contextvars import ContextVar
+
+_current_attempt_id_var: ContextVar[Optional[str]] = ContextVar(
+    "_current_attempt_id_var", default=None
+)
+
+_allocation_tracker_var: ContextVar[Optional[dict]] = ContextVar(
+    "_allocation_tracker_var", default=None
+)
+
 # ── Shared runtime objects (single instances, shared by reference) ────────────
 from api.job_runtime import OutputCapture, _current_job_id_var, jobs
 
@@ -273,6 +285,55 @@ def verify_pipeline_output(
     }
 
 
+def _rollback_attempt_transactions(tracker: dict, job: dict, context: str) -> bool:
+    """
+    Roll back all allocation transactions recorded during an outer pipeline attempt
+    in reverse order. Returns True if all rollbacks succeeded (or none were recorded),
+    or False if any rollback failed (setting job failure state).
+    """
+    transactions = tracker.get("transactions") or []
+    for entry in reversed(transactions):
+        if isinstance(entry, dict):
+            proj_name = entry.get("project_name")
+            tx_id = entry.get("attempt_id")
+            finished = bool(entry.get("finished", True))
+        else:
+            proj_name, tx_id = entry
+            finished = True
+
+        try:
+            rb_res = rollback_allocations(project_name=proj_name, attempt_id=tx_id)
+        except Exception as rb_exc:
+            sys.stderr.write(
+                f"❌ Rollback raised exception ({context}) for ({proj_name}, {tx_id}): {rb_exc}\n"
+            )
+            job["status"] = "failed"
+            job["current_step"] = "Error: Allocation Rollback Failed"
+            job["error"] = (
+                f"Rollback raised exception ({context}) for ({proj_name}, {tx_id}): {rb_exc}"
+            )
+            return False
+
+        status = rb_res.get("status")
+        if status in ("rolled_back", "already_rolled_back"):
+            continue
+        if status == "not_found" and not finished:
+            # assign_resources() failed or raised before creating a journal record
+            continue
+
+        sys.stderr.write(
+            f"❌ Rollback failed ({context}) for ({proj_name}, {tx_id}): {rb_res}\n"
+        )
+        job["status"] = "failed"
+        job["current_step"] = "Error: Allocation Rollback Failed"
+        job["error"] = (
+            f"Rollback failed ({context}) for ({proj_name}, {tx_id}): "
+            f"{rb_res.get('message', rb_res)}"
+        )
+        return False
+    return True
+
+
 def _run_pipeline(
     job_id: str,
     project_name: str,
@@ -366,29 +427,33 @@ def _run_pipeline(
 
         for attempt in range(1, MAX_RETRIES + 1):
             attempt_start_time = time.time()
-            print(f"DEBUG: Attempt {attempt}/{MAX_RETRIES} — model: {model_name}")
-
-            # Rebuild everything fresh on each attempt
-            agent = build_orchestrator(integrations=integrations)
-            session_service = InMemorySessionService()
-            runner = Runner(
-                app_name="pm_assistant_app",
-                agent=agent,
-                session_service=session_service,
-            )
-            sid = f"session_{job_id}_attempt{attempt}"
-            session_service.create_session_sync(
-                app_name="pm_assistant_app", user_id="user1", session_id=sid
-            )
-            content = Content(role="user", parts=[Part(text=payload)])
-
-            # Reset job progress for this attempt
-            job["current_step"] = "Generating PRD..."
-            job["completed_steps"] = []
-            job["status"] = "running"
-            job["error"] = None
+            attempt_id = f"{job_id}_attempt{attempt}"
+            attempt_token = _current_attempt_id_var.set(attempt_id)
+            tracker = {"seq": 0, "transactions": []}
+            tracker_token = _allocation_tracker_var.set(tracker)
+            print(f"DEBUG: Attempt {attempt}/{MAX_RETRIES} — model: {model_name} (attempt_id={attempt_id})")
 
             try:
+                # Rebuild everything fresh on each attempt
+                agent = build_orchestrator(integrations=integrations)
+                session_service = InMemorySessionService()
+                runner = Runner(
+                    app_name="pm_assistant_app",
+                    agent=agent,
+                    session_service=session_service,
+                )
+                sid = f"session_{job_id}_attempt{attempt}"
+                session_service.create_session_sync(
+                    app_name="pm_assistant_app", user_id="user1", session_id=sid
+                )
+                content = Content(role="user", parts=[Part(text=payload)])
+
+                # Reset job progress for this attempt
+                job["current_step"] = "Generating PRD..."
+                job["completed_steps"] = []
+                job["status"] = "running"
+                job["error"] = None
+                
                 # Layer 1: Run via run_async in an asyncio event loop so agent exceptions propagate directly
                 async def _consume_events():
                     out = ""
@@ -451,6 +516,9 @@ def _run_pipeline(
                     return
 
                 else:  # verification["status"] == "failed"
+                    if not _rollback_attempt_transactions(tracker, job, "verification failed"):
+                        job["logs"] = capture.lines
+                        return
                     err_msg = verification["error"]
                     print(f"❌ Output verification failed: {err_msg}")
                     job["status"] = "failed"
@@ -465,6 +533,9 @@ def _run_pipeline(
                 is_hard_zero_quota = "limit: 0" in err_msg
 
                 if is_rate_limit and not is_hard_zero_quota and attempt < MAX_RETRIES:
+                    if not _rollback_attempt_transactions(tracker, job, f"rate limit attempt {attempt}"):
+                        return
+
                     # Extract retry delay from error message
                     wait_seconds = 60  # default
                     import re as _re
@@ -477,14 +548,21 @@ def _run_pipeline(
                     time.sleep(wait_seconds)
                     continue  # Retry
                 else:
+                    rb_ok = _rollback_attempt_transactions(tracker, job, "terminal failure")
                     if is_hard_zero_quota:
                         sys.stderr.write(f"❌ Hard zero quota detected. Failing immediately.\n")
-                        job["error"] = "Your API key has a quota limit of 0. You MUST generate a key from https://aistudio.google.com/apikey. Keys from Google Cloud Console do not work on the free tier."
-                        job["status"] = "failed"
-                        job["current_step"] = "Error: Invalid API Key Quota (Limit: 0)"
+                        if rb_ok:
+                            job["error"] = "Your API key has a quota limit of 0. You MUST generate a key from https://aistudio.google.com/apikey. Keys from Google Cloud Console do not work on the free tier."
+                            job["status"] = "failed"
+                            job["current_step"] = "Error: Invalid API Key Quota (Limit: 0)"
                         return  # Exit immediately
+                    if not rb_ok:
+                        return
 
                     raise e  # Re-raise non-429 errors or final attempt failure
+            finally:
+                _allocation_tracker_var.reset(tracker_token)
+                _current_attempt_id_var.reset(attempt_token)
 
         # If we get here, all retries exhausted
         job["status"] = "failed"

@@ -185,12 +185,50 @@ class ResourceAllocationLogic:
     """
 
     def __call__(self, input_text: str) -> str:
+        from api.services.pipeline import _allocation_tracker_var, _current_attempt_id_var
+
         data = self._parse(input_text)
 
         project_name = data["project_name"]
         tasks = data["tasks"]
+        pipeline_attempt_id = _current_attempt_id_var.get()
+        tracker = _allocation_tracker_var.get()
 
-        result = assign_resources(project_name=project_name, tasks=tasks)
+        if pipeline_attempt_id and isinstance(tracker, dict):
+            tracker["seq"] += 1
+            tx_id = f"{pipeline_attempt_id}_alloc{tracker['seq']}"
+        else:
+            tx_id = pipeline_attempt_id
+
+        entry = None
+        if isinstance(tracker, dict) and project_name and tx_id:
+            entry = {
+                "project_name": project_name,
+                "attempt_id": tx_id,
+                "finished": False,
+            }
+            tracker["transactions"].append(entry)
+
+        result = assign_resources(
+            project_name=project_name,
+            tasks=tasks,
+            attempt_id=tx_id,
+        )
+        if entry is not None:
+            entry["project_name"] = result.get("project_name", project_name)
+            entry["attempt_id"] = result.get("attempt_id", tx_id)
+            if "error" not in result:
+                entry["finished"] = True
+        elif isinstance(tracker, dict):
+            actual_proj = result.get("project_name", project_name)
+            actual_tx_id = result.get("attempt_id", tx_id)
+            if actual_proj and actual_tx_id:
+                tracker["transactions"].append({
+                    "project_name": actual_proj,
+                    "attempt_id": actual_tx_id,
+                    "finished": "error" not in result,
+                })
+
         result["resource_blocked"] = self._has_shortage(result.get("tasks", []))
 
         if result["resource_blocked"]:
