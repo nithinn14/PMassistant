@@ -82,13 +82,35 @@ def _has_shortage(tasks: list) -> bool:
     A task is considered a resource shortage when:
       • Assigned_Employee == "No Resource Available", OR
       • task_status == "waiting_resource"
+
+    Approved external-hire tasks are excluded.
     """
     for t in tasks:
-        emp = str(t.get("Assigned_Employee", "")).strip().lower()
         status = str(t.get("task_status", "")).strip().lower()
+        emp = str(t.get("Assigned_Employee", "")).strip().lower()
+
+        if status == "needs_external_hire" or emp == "needs_external_hire":
+            continue
+
         if emp == "no resource available" or status == "waiting_resource":
             return True
+
     return False
+
+def _mark_external_hire_tasks(tasks: list, shortages: list) -> None:
+    """Mark only reliably identified shortage tasks for external hiring."""
+    shortage_ids = {
+        str(item.get("task_id")).strip()
+        for item in shortages
+        if item.get("task_id") is not None
+        and str(item.get("task_id")).strip().lower() not in ("", "n/a", "none")
+    }
+
+    for task in tasks:
+        task_id = str(task.get("task_id", "")).strip()
+
+        if task_id and task_id in shortage_ids:
+            task["task_status"] = "NEEDS_EXTERNAL_HIRE"
 
 
 # ---------------------------------------------------------------------------
@@ -230,6 +252,8 @@ class ResourceValidationAgent(BaseAgent):
                 print(f"Resolution received: {res}")
 
                 if res == "APPROVE_EXTERNAL_HIRING":
+                    _mark_external_hire_tasks(tasks, shortages)
+
                     update_workflow_state(
                         project_name=project_name,
                         status="COMPLETED",
@@ -238,6 +262,7 @@ class ResourceValidationAgent(BaseAgent):
                         resolution=res,
                     )
                     should_escalate = True
+
                 else:
                     # Retry (ADD_RESOURCE, REBALANCE, etc.)
                     # Reset resolution to PENDING so we don't loop on same signal

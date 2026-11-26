@@ -20,7 +20,14 @@ def validate_resources(project_name: str, tasks: List[Dict[str, Any]]) -> Dict[s
     shortages = []
 
     for task in tasks:
-        if task.get("Assigned_Employee") == "No Resource Available":
+        emp = str(task.get("Assigned_Employee", "")).strip().lower()
+        status = str(task.get("task_status", "")).strip().lower()
+
+        # Approved external-hire tasks are no longer unresolved shortages.
+        if status == "needs_external_hire" or emp == "needs_external_hire":
+            continue
+
+        if emp == "no resource available" or status == "waiting_resource":
             shortages.append({
                 "task": task.get("task_name", "Unknown Task"),
                 "task_id": task.get("task_id", "N/A"),
