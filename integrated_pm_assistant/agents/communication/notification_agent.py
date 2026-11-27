@@ -117,6 +117,65 @@ class NotificationAgent:
 
         return email_sent
 
+    def notify_resource_shortage_reminder(
+        self,
+        pm_email: Optional[str],
+        project_name: str,
+        missing_roles: Optional[Dict[str, int]] = None,
+        run_id: Optional[str] = None,
+    ) -> bool:
+        """
+        Send a reminder email to the PM when resource shortage resolution is still pending.
+        Returns True if the email was sent, False otherwise.
+        """
+        if self._email is None:
+            print(
+                f"⚠️ [NotificationAgent] Email notifier disabled; skipping reminder for '{project_name}'."
+            )
+            return False
+
+        if not is_valid_email(pm_email):
+            print(
+                f"⚠️ [NotificationAgent] Invalid or missing PM email ('{pm_email}'); "
+                f"skipping reminder for '{project_name}'."
+            )
+            return False
+
+        roles_summary = (
+            ", ".join(f"{role} ({cnt})" for role, cnt in (missing_roles or {}).items())
+            or "unspecified roles"
+        )
+        run_line = f"\nRun ID: {run_id}" if run_id else ""
+        approve_cmd = (
+            f"/approve_external_hiring {run_id}"
+            if run_id
+            else "/approve_external_hiring <run_id>"
+        )
+        subject = f"Reminder: Resource Resolution Pending | {project_name}"
+        body = (
+            f"Hello Project Manager,\n\n"
+            f"Resource shortage resolution is still PENDING for project '{project_name}'.{run_line}\n"
+            f"Missing roles: {roles_summary}\n\n"
+            f"Please respond via the PM Assistant Telegram bot using one of:\n"
+            f"  - /add_employee\n"
+            f"  - {approve_cmd}\n"
+            f"  - /rebalance_tasks\n\n"
+            f"Thank you,\nPM Assistant"
+        )
+        try:
+            return bool(
+                self._email.send(
+                    to_email=str(pm_email).strip(),
+                    subject=subject,
+                    message=body,
+                )
+            )
+        except Exception as exc:
+            print(
+                f"⚠️ [NotificationAgent] Reminder email send failed for '{project_name}': {exc}"
+            )
+            return False
+
     def notify_task_assignments_batch(
         self,
         project_name: str,

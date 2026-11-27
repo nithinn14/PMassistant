@@ -13,8 +13,11 @@ Key improvements:
 
 import json
 import asyncio
+import math
 import os
 import re
+import time
+import uuid
 from pathlib import Path
 from typing import AsyncGenerator, Optional
 from pydantic import Field
@@ -29,7 +32,9 @@ from tools.resources.resource_validator import (
     validate_resources,
     save_diagnostic_report,
     update_workflow_state,
+    conditional_update_workflow_state,
     check_workflow_resolution,
+    PMResponseTimeoutError,
 )
 from communication.factory import build_notification_agent
 from communication.email.email_notifier import is_valid_email
@@ -42,8 +47,52 @@ from communication.telegram.telegram_bot import run_telegram_listener
 # Config helpers
 # ---------------------------------------------------------------------------
 
-def _get_poll_interval() -> int:
-    return load_config()["workflow"]["poll_interval_seconds"]
+def _get_poll_interval() -> float:
+    try:
+        val = float(load_config().get("workflow", {}).get("poll_interval_seconds", 30))
+        return val if math.isfinite(val) and val > 0 else 30.0
+    except Exception:
+        return 30.0
+
+
+def _parse_non_negative_float(value, default: float) -> float:
+    try:
+        parsed = float(value)
+        return parsed if math.isfinite(parsed) and parsed >= 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _parse_positive_int(value, default: int) -> int:
+    try:
+        parsed = int(value)
+        return parsed if parsed >= 1 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _get_timeout_settings() -> dict:
+    try:
+        wf = load_config().get("workflow", {}) or {}
+        if not isinstance(wf, dict):
+            wf = {}
+    except Exception:
+        wf = {}
+
+    return {
+        "initial_wait_seconds": _parse_non_negative_float(
+            wf.get("pm_initial_wait_seconds"), 86400.0
+        ),
+        "reminder_wait_seconds": _parse_non_negative_float(
+            wf.get("pm_reminder_wait_seconds"), 86400.0
+        ),
+        "reminder_max_attempts": _parse_positive_int(
+            wf.get("reminder_max_attempts"), 3
+        ),
+        "reminder_retry_delay_seconds": _parse_non_negative_float(
+            wf.get("reminder_retry_delay_seconds"), 5.0
+        ),
+    }
 
 
 def _get_pm_email() -> Optional[str]:
@@ -188,8 +237,9 @@ class ResourceValidationAgent(BaseAgent):
             validation["notification_issues"] = notification_issues
 
         diagnostic_path = save_diagnostic_report(project_name, validation)
-        # Important: always reset resolution to PENDING when entering a new
-        # shortage cycle, so stale state from a previous run is overwritten.
+        run_id = str(uuid.uuid4())
+        # Important: always reset resolution to PENDING and assign a fresh run_id
+        # when entering a new shortage cycle, so stale state from a previous run is overwritten.
         workflow_path = update_workflow_state(
             project_name=project_name,
             status="RESOURCE_BLOCKED",
@@ -197,6 +247,7 @@ class ResourceValidationAgent(BaseAgent):
             diagnostic_path=diagnostic_path,
             resolution="PENDING",
             notification_issues=notification_issues if notification_issues else None,
+            run_id=run_id,
         )
 
         # Send Email + Telegram alert (with bot command hints)
@@ -233,49 +284,73 @@ class ResourceValidationAgent(BaseAgent):
         bot_task = None
         if self.integrations.get("telegram", True):
             bot_task = asyncio.create_task(
-                run_telegram_listener(project_name),
+                run_telegram_listener(project_name, run_id=run_id),
                 name=f"telegram_bot_{project_name}",
             )
 
         # These will be set inside the loop to decide what to yield
         should_escalate = False
-        resolved = False
+        stale_run_detected = False
+        timed_out = False
+
+        timeout_cfg = _get_timeout_settings()
+        stage = 1
+        deadline = time.monotonic() + timeout_cfg["initial_wait_seconds"]
 
         while True:
-            await asyncio.sleep(poll_interval)
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                await asyncio.sleep(min(poll_interval, remaining))
 
             # Check 1: Manual resolution via workflow_state.yaml
             state = check_workflow_resolution(project_name)
+            state_run_id = str(state.get("run_id") or "").strip()
+            if state_run_id != run_id:
+                print(
+                    f"⚠️ Stale ResourceValidationAgent invocation for '{project_name}' "
+                    f"(state run_id={state_run_id!r}, expected={run_id!r}) — stopping wait cycle."
+                )
+                stale_run_detected = True
+                break
+
             res = state.get("resolution", "PENDING")
 
             if res not in ("PENDING", None):
                 print(f"Resolution received: {res}")
 
                 if res == "APPROVE_EXTERNAL_HIRING":
-                    _mark_external_hire_tasks(tasks, shortages)
-
-                    update_workflow_state(
+                    if not conditional_update_workflow_state(
                         project_name=project_name,
+                        expected_run_id=run_id,
                         status="COMPLETED",
                         missing_roles=missing_roles,
                         diagnostic_path=diagnostic_path,
                         resolution=res,
-                    )
+                        expected_status="RESOURCE_BLOCKED",
+                        expected_resolution="APPROVE_EXTERNAL_HIRING",
+                    ):
+                        stale_run_detected = True
+                        break
+                    _mark_external_hire_tasks(tasks, shortages)
                     should_escalate = True
 
                 else:
                     # Retry (ADD_RESOURCE, REBALANCE, etc.)
                     # Reset resolution to PENDING so we don't loop on same signal
-                    update_workflow_state(
+                    if not conditional_update_workflow_state(
                         project_name=project_name,
+                        expected_run_id=run_id,
                         status="RETRYING",
                         missing_roles=missing_roles,
                         diagnostic_path=diagnostic_path,
                         resolution="PENDING",
-                    )
+                        expected_status="RESOURCE_BLOCKED",
+                        expected_resolution=res,
+                    ):
+                        stale_run_detected = True
+                        break
                     should_escalate = False
 
-                resolved = True
                 break
 
             # Check 2: employees.xlsx mtime changed -> auto-trigger
@@ -289,18 +364,51 @@ class ResourceValidationAgent(BaseAgent):
                     f"'{employees_path.name}' changed -- auto-triggering "
                     f"incremental assignment for '{project_name}'"
                 )
-                update_workflow_state(
+                if not conditional_update_workflow_state(
                     project_name=project_name,
+                    expected_run_id=run_id,
                     status="RETRYING",
                     missing_roles=missing_roles,
                     diagnostic_path=diagnostic_path,
                     resolution="PENDING",
-                )
+                    expected_status="RESOURCE_BLOCKED",
+                    expected_resolution="PENDING",
+                ):
+                    stale_run_detected = True
+                    break
                 should_escalate = False
-                resolved = True
                 break
 
             last_employees_mtime = current_mtime
+
+            # Check 3: Monotonic deadline expiration (two-stage wait)
+            if time.monotonic() >= deadline:
+                if stage == 1:
+                    await self._send_reminder_with_retries(
+                        project_name=project_name,
+                        pm_email=pm_email,
+                        missing_roles=missing_roles,
+                        run_id=run_id,
+                        max_attempts=timeout_cfg["reminder_max_attempts"],
+                        retry_delay=timeout_cfg["reminder_retry_delay_seconds"],
+                    )
+                    stage = 2
+                    deadline = time.monotonic() + timeout_cfg["reminder_wait_seconds"]
+                else:
+                    if not conditional_update_workflow_state(
+                        project_name=project_name,
+                        expected_run_id=run_id,
+                        status="RESOURCE_BLOCKED",
+                        missing_roles=missing_roles,
+                        diagnostic_path=diagnostic_path,
+                        resolution="PM_RESPONSE_TIMEOUT",
+                        expected_status="RESOURCE_BLOCKED",
+                        expected_resolution="PENDING",
+                    ):
+                        stale_run_detected = True
+                        break
+                    timed_out = True
+                    break
 
         # Cancel the Telegram bot BEFORE yielding (avoids async generator crash)
         if bot_task is not None and not bot_task.done():
@@ -310,9 +418,72 @@ class ResourceValidationAgent(BaseAgent):
             except asyncio.CancelledError:
                 pass
 
+        if stale_run_detected:
+            raise RuntimeError(
+                f"ResourceValidationAgent invocation for '{project_name}' was superseded by a newer run."
+            )
+
+        if timed_out:
+            raise PMResponseTimeoutError(project_name=project_name, run_id=run_id)
+
         yield self._event(ctx, data, escalate=should_escalate)
 
     # ── Helpers ──────────────────────────────────────────────────────────────
+
+    async def _send_reminder_with_retries(
+        self,
+        project_name: str,
+        pm_email: Optional[str],
+        missing_roles: dict,
+        run_id: str,
+        max_attempts: int,
+        retry_delay: float,
+    ) -> bool:
+        if not self.integrations.get("gmail", True):
+            print(
+                f"⚠️ [ResourceValidation] Gmail disabled; skipping reminder email for '{project_name}'."
+            )
+            return False
+
+        if not is_valid_email(pm_email):
+            print(
+                f"⚠️ [ResourceValidation] PM email missing/invalid ('{pm_email}'); "
+                f"skipping reminder email for '{project_name}'."
+            )
+            return False
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                notifier = build_notification_agent(
+                    load_config(), integrations=self.integrations
+                )
+                sent = notifier.notify_resource_shortage_reminder(
+                    pm_email=pm_email,
+                    project_name=project_name,
+                    missing_roles=missing_roles,
+                    run_id=run_id,
+                )
+                if sent:
+                    print(
+                        f"📧 Reminder email sent for '{project_name}' on attempt {attempt}/{max_attempts}."
+                    )
+                    return True
+                print(
+                    f"⚠️ Reminder email attempt {attempt}/{max_attempts} returned False for '{project_name}'."
+                )
+            except Exception as exc:
+                print(
+                    f"⚠️ Reminder email attempt {attempt}/{max_attempts} failed for '{project_name}': {exc}"
+                )
+
+            if attempt < max_attempts and retry_delay > 0:
+                await asyncio.sleep(retry_delay)
+
+        print(
+            f"❌ All {max_attempts} reminder email attempts failed for '{project_name}'; "
+            "continuing to second wait period."
+        )
+        return False
 
     def _extract_input(self, ctx) -> str:
         for event in reversed(ctx._get_events(current_invocation=True)):

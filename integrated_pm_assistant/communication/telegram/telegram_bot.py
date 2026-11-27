@@ -20,9 +20,10 @@ Supported commands:
                          Writing to employees.xlsx triggers the mtime-watcher in
                          ResourceValidationAgent, which fires incremental assignment.
 
-  /approve_external_hiring
-                         Logs the decision to output/decision_log.json and sets
-                         the resolution in workflow_state.yaml so the LoopAgent proceeds.
+  /approve_external_hiring <run_id>
+                         Approves external hiring for the specified pipeline run.
+                         Requires the current run ID; stale or mismatched approvals
+                         are rejected.
 
   /rebalance_tasks       Sets resolution="REBALANCE" in workflow_state.yaml, which
                          causes the ADK LoopAgent to re-run incremental assignment.
@@ -50,6 +51,10 @@ import requests
 
 from data_backend import get_backend  # noqa: E402
 from config_loader import load_config  # noqa: E402
+from tools.resources.resource_validator import (  # noqa: E402
+    _WORKFLOW_STATE_LOCK,
+    _atomic_write_yaml,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -230,12 +235,118 @@ def handle_add_employee(bot: TelegramBot, chat_id: str, text: str) -> None:
     bot.send(chat_id, "Conversation reset. Type /add_employee to start again.")
 
 
-def handle_approve_external_hiring(bot: TelegramBot, chat_id: str) -> None:
+def _conditional_update_approval_resolution(
+    outdir: Path,
+    project_name: str,
+    supplied_run_id: str,
+    expected_run_id: str | None = None,
+) -> tuple[bool, str]:
+    """
+    Atomically (within process) validate workflow_state.yaml and transition
+    resolution to APPROVE_EXTERNAL_HIRING only if:
+      - status == "RESOURCE_BLOCKED"
+      - run_id matches supplied_run_id (and expected_run_id if provided)
+      - resolution == "PENDING"
+    """
+    import yaml
+
+    state_path = outdir / f"{project_name}_workflow_state.yaml"
+    with _WORKFLOW_STATE_LOCK:
+        if not state_path.exists():
+            return False, f"Approval rejected: workflow state for '{project_name}' does not exist."
+
+        try:
+            with open(state_path, "r", encoding="utf-8") as f:
+                state = yaml.safe_load(f) or {}
+        except Exception as exc:
+            return False, (
+                f"Approval rejected: could not read workflow state for '{project_name}' ({exc})."
+            )
+
+        if not isinstance(state, dict):
+            return False, (
+                f"Approval rejected: workflow state for '{project_name}' "
+                "is invalid (expected a YAML mapping)."
+            )
+
+        current_status = state.get("status")
+        current_run_id = str(state.get("run_id") or "").strip()
+        current_resolution = state.get("resolution")
+
+        if current_status != "RESOURCE_BLOCKED":
+            return False, (
+                f"Approval rejected: project '{project_name}' is not RESOURCE_BLOCKED "
+                f"(current status: {current_status})."
+            )
+
+        if not current_run_id or supplied_run_id != current_run_id or (
+            expected_run_id is not None and supplied_run_id != expected_run_id
+        ):
+            return False, (
+                f"Approval rejected: stale or mismatched run_id '{supplied_run_id}' "
+                f"for project '{project_name}'."
+            )
+
+        if current_resolution != "PENDING":
+            return False, (
+                f"Approval rejected: project '{project_name}' resolution is already "
+                f"'{current_resolution}' (not PENDING)."
+            )
+
+        state["resolution"] = "APPROVE_EXTERNAL_HIRING"
+        state["timestamp"] = datetime.now().isoformat()
+
+        _atomic_write_yaml(state_path, state)
+
+        print(f"{state_path.name} -> resolution=APPROVE_EXTERNAL_HIRING (run_id={supplied_run_id})")
+        return True, ""
+
+
+def handle_approve_external_hiring(
+    bot: TelegramBot,
+    chat_id: str,
+    text: str = "",
+    project_name: str | None = None,
+    expected_run_id: str | None = None,
+) -> None:
     """
     Log the external hiring approval decision and update workflow state so the
     ADK LoopAgent can proceed.
+
+    Requires `/approve_external_hiring <run_id>` and conditionally updates the
+    target project's workflow_state.yaml only when status=RESOURCE_BLOCKED,
+    run_id matches, and resolution=PENDING.
     """
+    parts = text.strip().split()
+    supplied_run_id = parts[1].strip() if len(parts) == 2 else ""
+    if not supplied_run_id:
+        bot.send(
+            chat_id,
+            "Invalid command format.\n\n"
+            "Please supply the run ID:\n"
+            "  /approve_external_hiring <run_id>",
+        )
+        return
+
     outdir = _output_dir()
+    target_project = project_name if project_name is not None else _detect_active_project(outdir)
+    if not target_project:
+        bot.send(
+            chat_id,
+            "Approval rejected: no active project workflow state found.",
+        )
+        return
+
+    ok, err_msg = _conditional_update_approval_resolution(
+        outdir=outdir,
+        project_name=target_project,
+        supplied_run_id=supplied_run_id,
+        expected_run_id=expected_run_id,
+    )
+    if not ok:
+        bot.send(chat_id, err_msg)
+        return
+
     log_path = outdir / "decision_log.json"
 
     # Load or create the decision log
@@ -245,11 +356,10 @@ def handle_approve_external_hiring(bot: TelegramBot, chat_id: str) -> None:
     else:
         log = []
 
-    project_name = _detect_active_project(outdir)
-
     entry = {
         "command": "/approve_external_hiring",
-        "project": project_name,
+        "project": target_project,
+        "run_id": supplied_run_id,
         "timestamp": datetime.now().isoformat(),
         "decision": "APPROVE_EXTERNAL_HIRING",
     }
@@ -258,16 +368,17 @@ def handle_approve_external_hiring(bot: TelegramBot, chat_id: str) -> None:
     with open(log_path, "w", encoding="utf-8") as f:
         json.dump(log, f, indent=2, default=str)
 
-    if project_name:
-        _update_resolution(outdir, project_name, "APPROVE_EXTERNAL_HIRING")
-
-    print(f"External hiring approved for '{project_name}' -> logged to {log_path}")
+    print(
+        f"External hiring approved for '{target_project}' (run_id={supplied_run_id}) "
+        f"-> logged to {log_path}"
+    )
     bot.send(
         chat_id,
         f"External Hiring Approved\n\n"
-        f"Project: {project_name or 'Unknown'}\n"
+        f"Project: {target_project}\n"
+        f"Run ID: {supplied_run_id}\n"
         f"Decision logged to decision_log.json.\n\n"
-        f"The system will proceed with the current resource plan."
+        f"The system will proceed with the current resource plan.",
     )
 
 
@@ -295,26 +406,44 @@ def handle_rebalance_tasks(bot: TelegramBot, chat_id: str) -> None:
     )
 
 
-def _dispatch(bot: TelegramBot, user_chat_id: str, text: str) -> None:
+def _dispatch(
+    bot: TelegramBot,
+    user_chat_id: str,
+    text: str,
+    project_name: str | None = None,
+    run_id: str | None = None,
+) -> None:
     """Route a single incoming message to the correct handler."""
     print(f"[Telegram] [{user_chat_id}] {text}")
 
-    # Normalize: allow both /add_employee and /addemployee (or even AddEmployee)
-    cmd = text.lower().strip().replace("_", "").replace("/", "")
+    # Normalize the command token (first whitespace-delimited token)
+    first_token = text.strip().split()[0] if text.strip() else ""
+    cmd = first_token.lower().replace("_", "").replace("/", "")
 
     if cmd == "addemployee" or _get_state(user_chat_id).get("step"):
         handle_add_employee(bot, user_chat_id, text)
     elif cmd == "approveexternalhiring":
-        handle_approve_external_hiring(bot, user_chat_id)
+        handle_approve_external_hiring(
+            bot,
+            user_chat_id,
+            text=text,
+            project_name=project_name,
+            expected_run_id=run_id,
+        )
     elif cmd == "rebalancetasks":
         handle_rebalance_tasks(bot, user_chat_id)
     else:
+        approve_hint = (
+            f"  /approve_external_hiring {run_id}"
+            if run_id
+            else r"  /approve\_external\_hiring <run\_id>"
+        )
         bot.send(
             user_chat_id,
             "Unknown command.\n\n"
             "Available commands:\n"
             r"  /add\_employee" "\n"
-            r"  /approve\_external\_hiring" "\n"
+            f"{approve_hint}\n"
             r"  /rebalance\_tasks",
         )
 
@@ -378,13 +507,13 @@ def _update_resolution(outdir: Path, project_name: str, resolution: str) -> None
 # Async listener — spawned by ResourceValidationAgent as an asyncio.Task
 # ---------------------------------------------------------------------------
 
-async def run_telegram_listener(project_name: str) -> None:
+async def run_telegram_listener(project_name: str, run_id: str | None = None) -> None:
     """
     Async Telegram polling loop run as a background asyncio.Task inside
     ResourceValidationAgent during a resource shortage wait period.
 
     Usage inside ResourceValidationAgent:
-        bot_task = asyncio.create_task(run_telegram_listener(project_name))
+        bot_task = asyncio.create_task(run_telegram_listener(project_name, run_id=run_id))
         # ... dual-watch wait loop ...
         bot_task.cancel()
 
@@ -400,11 +529,16 @@ async def run_telegram_listener(project_name: str) -> None:
     bot = TelegramBot(token=token, chat_id=chat_id)
     print("[Embedded] Telegram bot listening for PM commands...")
 
+    approve_cmd = (
+        f"/approve_external_hiring {run_id}"
+        if run_id
+        else "/approve_external_hiring <run_id>"
+    )
     bot.reply(
         f"PM Bot active - waiting for your decision on {project_name}!\n\n"
         "Available commands:\n"
         r"  /add\_employee - Add a team member" "\n"
-        r"  /approve\_external\_hiring - Approve external hire" "\n"
+        f"  {approve_cmd} - Approve external hire\n"
         r"  /rebalance\_tasks - Trigger reassignment"
     )
 
@@ -421,7 +555,14 @@ async def run_telegram_listener(project_name: str) -> None:
                 text = msg.get("text", "").strip()
                 if text:
                     # Handlers do file I/O -- run in thread to stay non-blocking
-                    await asyncio.to_thread(_dispatch, bot, user_chat_id, text)
+                    await asyncio.to_thread(
+                        _dispatch,
+                        bot,
+                        user_chat_id,
+                        text,
+                        project_name,
+                        run_id,
+                    )
 
             # Yield back to the event loop so the dual-watch loop can run
             await asyncio.sleep(0.5)
@@ -454,7 +595,7 @@ def main():
 
     bot = TelegramBot(token=token, chat_id=chat_id)
     print("PM Assistant Telegram Bot running (standalone mode)...")
-    print("  Listening for: /add_employee | /approve_external_hiring | /rebalance_tasks")
+    print("  Listening for: /add_employee | /approve_external_hiring <run_id> | /rebalance_tasks")
     print("  Press Ctrl+C to stop.\n")
 
     bot.reply(

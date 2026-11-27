@@ -28,6 +28,7 @@ from typing import List, Optional
 import yaml
 
 from tools.resources.assign_employee_tool import rollback_allocations
+from tools.resources.resource_validator import PMResponseTimeoutError
 
 from contextvars import ContextVar
 
@@ -526,6 +527,28 @@ def _run_pipeline(
                     job["current_step"] = verification["current_step"]
                     job["logs"] = capture.lines
                     return
+
+            except PMResponseTimeoutError as timeout_exc:
+                actual_project_name = find_actual_project_name(
+                    original_project_name=project_name,
+                    output_dir=DEFAULT_OUTPUT_DIR,
+                    job_start_time=attempt_start_time,
+                    logs=capture.lines,
+                    job=job,
+                )
+                job["actual_project_name"] = actual_project_name
+                job["project_name"] = actual_project_name
+                _save_project_integrations(actual_project_name, integrations)
+                job["status"] = "resource_blocked"
+                job["current_step"] = "PM Response Timed Out"
+                if "PM Response Timed Out" not in job["completed_steps"]:
+                    job["completed_steps"].append("PM Response Timed Out")
+                job["error"] = str(timeout_exc)
+                job["logs"] = capture.lines
+                print(
+                    f"⏱️ Pipeline paused at Resource Validation for '{actual_project_name}' ({timeout_exc})"
+                )
+                return
 
             except Exception as e:
                 err_msg = str(e)
